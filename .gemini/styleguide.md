@@ -1,8 +1,7 @@
-# Code Review Guidance
 
-## Overview  
-This codebase frequently encounters risks related to configuration flexibility, inheritance complexity, and cross-system consistency. Tight coupling between components, ambiguous parameter handling, and platform-specific assumptions often lead to subtle bugs in distributed workflows. A structured review approach ensures robustness across deployment scenarios, prevents technical debt from implicit dependencies, and maintains API coherence as new modules integrate with existing systems.
+# 强制要求（必须遵守）
 
-## Hard requirements (MUST)
-
-- MUST write all review comments in Chinese.
+- 必须使用中文撰写所有 review 评论。
+- 禁止输出英文句子。
+- 允许保留代码标识符、类名、函数名、参数名为英文原样（例如 LazyLLMOnlineChatModuleBase.share）。
+- 如果需要术语，请用中文解释（例如“里氏替换原则（LSP）”）。
