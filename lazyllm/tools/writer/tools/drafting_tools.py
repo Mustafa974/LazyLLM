@@ -5,6 +5,8 @@ from typing import Any, List
 from .base import WriterToolBase
 from ..data_models.context import WritingContext
 from ..data_models.task import WritingTask
+from ..data_models.docir import DocIR
+from ..utils.ir_convert import docir_to_outline
 from ..data_models.writing import (
     DraftBlock,
     DraftDocument,
@@ -82,7 +84,10 @@ class WriterDraftingTools(WriterToolBase):
             raise ValueError('draft_sections must contain at least one DraftSection.')
 
         writing_context = self._unified_model(context, WritingContext)
-        writing_outline = self._unified_optional_model(outline, WritingOutline)
+        writing_outline = None
+        if outline is not None:
+            writing_outline = docir_to_outline(
+                self._unified_model(outline, DocIR))
         normalized_sections = [
             self._normalize_document_section(section, index)
             for index, section in enumerate(sections, start=1)

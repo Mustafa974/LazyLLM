@@ -12,6 +12,10 @@ from ..data_models.writing import (
     WritingOutline,
 )
 from ..prompts import GENERATE_OUTLINE_PROMPT, GENERATE_SECTION_INSTRUCTIONS_PROMPT
+from ..data_models.docir import DocBlock, DocIR
+from ..utils.ir_convert import (
+    outline_to_docir_blocks, docir_to_outline,
+)
 from ..utils import to_prompt_json
 
 
@@ -19,6 +23,8 @@ class WriterPlanningTools(WriterToolBase):
     __public_apis__ = [
         'generate_outline',
         'generate_section_instructions',
+        'outline_to_doc_ir',
+        'doc_ir_to_outline',
     ]
 
     def generate_outline(
@@ -42,11 +48,9 @@ class WriterPlanningTools(WriterToolBase):
         outline = self._call_llm_structured(prompt, WritingOutline)
         outline = self._normalize_outline(outline, writing_task, writing_context, profiles, execution_data)
 
-        result = self._save_artifacts(
-            {'outline': outline},
+        return self.outline_to_doc_ir(
+            outline,
             step_name='generate_outline',
-            primary_key='outline',
-            context_key=None,
             summary='Generated writing outline.',
             counts={
                 'top_level_sections': len(outline.nodes),
@@ -59,7 +63,6 @@ class WriterPlanningTools(WriterToolBase):
                 'has_execution_results': execution_data is not None,
             },
         )
-        return result.model_dump()
 
     def generate_section_instructions(
         self,
@@ -67,7 +70,8 @@ class WriterPlanningTools(WriterToolBase):
         context: Any,
         execution_results: Any = None,
     ) -> dict:
-        writing_outline = self._unified_model(outline, WritingOutline)
+        writing_outline = docir_to_outline(
+            self._unified_model(outline, DocIR))
         writing_context = self._unified_model(context, WritingContext)
         execution_data = self._normalize_execution_results(execution_results)
         target_nodes = self._instruction_target_nodes(writing_outline)
@@ -325,3 +329,58 @@ class WriterPlanningTools(WriterToolBase):
         if not valid_source_refs:
             return []
         return [source_ref for source_ref in source_refs if source_ref in valid_source_refs]
+
+    def outline_to_doc_ir(self, outline: Any, **kwargs) -> dict:
+        '''Convert a WritingOutline into a DocIR artifact.'''
+        source = self._unified_model(outline, WritingOutline)
+        blocks = outline_to_docir_blocks(source)
+        doc_ir = DocIR(
+            doc_id=source.outline_id,
+            title=source.title,
+            blocks=blocks,
+            adapter='',
+            plain_text=self._extract_blocks_text(blocks),
+        )
+        kwargs.setdefault('step_name', 'outline_to_doc_ir')
+        kwargs.setdefault('summary', 'Converted WritingOutline into DocIR.')
+        kwargs.setdefault('counts', {
+            'blocks': len(doc_ir.blocks),
+        })
+        kwargs.setdefault('artifact_meta', {})
+        kwargs['artifact_meta'].setdefault('outline_id', source.outline_id)
+        doc_ir.meta['source_kind'] = 'outline'
+        return self._save_artifacts(
+            {'doc_ir': doc_ir},
+            primary_key='doc_ir',
+            context_key=None,
+            artifact_filenames={
+                'doc_ir': f'doc_ir_{source.outline_id or "outline"}.json',
+            },
+            **kwargs,
+        ).model_dump()
+
+    def doc_ir_to_outline(self, doc_ir: Any) -> dict:
+        '''Convert a DocIR into a WritingOutline artifact.'''
+        outline = docir_to_outline(self._unified_model(doc_ir, DocIR))
+        return self._save_artifacts(
+            {'outline': outline},
+            step_name='doc_ir_to_outline',
+            primary_key='outline',
+            context_key=None,
+            summary='Converted DocIR into WritingOutline.',
+            counts={'nodes': len(outline.nodes)},
+            artifact_meta={'outline_id': outline.outline_id},
+            artifact_filenames={
+                'outline': f'outline_{outline.outline_id or "document"}.json',
+            },
+        ).model_dump()
+
+    @staticmethod
+    def _extract_blocks_text(blocks: List[DocBlock], collector: Optional[List[str]] = None) -> str:
+        if collector is None:
+            collector = []
+        for b in blocks:
+            if b.text:
+                collector.append(b.text)
+            WriterPlanningTools._extract_blocks_text(b.children, collector)
+        return '\n'.join(collector) if collector is not None else ''

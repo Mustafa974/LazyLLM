@@ -150,10 +150,10 @@ def test_write_workflow_e2e():
     assert ctx.document_summary is not None
     assert len(ctx.document_summary.key_points) >= 2
 
-    # --- Step 3: outline ---
-    outline = _load_stage(stages, 'outline', WritingOutline)
-    assert outline is not None
-    assert len(outline.nodes) >= 1
+    # --- Step 3: outline (stored as DocIR) ---
+    outline_doc_ir = _load_stage(stages, 'outline', DocIR)
+    assert outline_doc_ir is not None
+    assert len(outline_doc_ir.blocks) >= 1
 
     # --- Step 4: section_instructions ---
     instructions = _load_stage(stages, 'section_instructions', SectionInstructionList)
