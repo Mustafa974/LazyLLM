@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 from typing import Any, List, Optional
 
 from .base import WriterToolBase
@@ -7,11 +8,13 @@ from ..data_models.resource import ResourceProfile
 from ..data_models.task import WritingTask
 from ..data_models.writing import (
     OutlineNode,
+    OutlineNodeConstraints,
     SectionInstruction,
     SectionInstructionList,
     WritingOutline,
 )
 from ..prompts import GENERATE_OUTLINE_PROMPT, GENERATE_SECTION_INSTRUCTIONS_PROMPT
+from ..data_models.docir import DocBlock, DocIR
 from ..utils import to_prompt_json
 
 
@@ -19,6 +22,8 @@ class WriterPlanningTools(WriterToolBase):
     __public_apis__ = [
         'generate_outline',
         'generate_section_instructions',
+        'outline_to_doc_ir',
+        'doc_ir_to_outline',
     ]
 
     def generate_outline(
@@ -325,3 +330,94 @@ class WriterPlanningTools(WriterToolBase):
         if not valid_source_refs:
             return []
         return [source_ref for source_ref in source_refs if source_ref in valid_source_refs]
+
+    def outline_to_doc_ir(self, outline: Any) -> dict:
+        '''Convert a WritingOutline into a DocIR artifact.'''
+        source = self._unified_model(outline, WritingOutline)
+        blocks = [self._outline_node_to_block(n, 1) for n in source.nodes]
+        doc_ir = DocIR(
+            doc_id=source.outline_id,
+            title=source.title,
+            blocks=blocks,
+            adapter='outline',
+            plain_text=self._extract_blocks_text(blocks),
+        )
+        return self._save_artifacts(
+            {'doc_ir': doc_ir},
+            step_name='outline_to_doc_ir',
+            primary_key='doc_ir',
+            context_key=None,
+            summary='Converted WritingOutline into DocIR.',
+            counts={'blocks': len(blocks)},
+            artifact_meta={'outline_id': source.outline_id},
+            artifact_filenames={
+                'doc_ir': f'doc_ir_{source.outline_id or "outline"}.json',
+            },
+        ).model_dump()
+
+    def doc_ir_to_outline(self, doc_ir: Any) -> dict:
+        '''Convert a DocIR into a WritingOutline artifact.'''
+        source = self._unified_model(doc_ir, DocIR)
+        nodes = [self._block_to_outline_node(b) for b in source.blocks
+                 if b.block_type == 'heading']
+        outline = WritingOutline(
+            outline_id=source.doc_id,
+            title=source.title,
+            nodes=nodes,
+        )
+        return self._save_artifacts(
+            {'outline': outline},
+            step_name='doc_ir_to_outline',
+            primary_key='outline',
+            context_key=None,
+            summary='Converted DocIR into WritingOutline.',
+            counts={'nodes': len(nodes)},
+            artifact_meta={'doc_id': source.doc_id},
+            artifact_filenames={
+                'outline': f'outline_{source.doc_id or "document"}.json',
+            },
+        ).model_dump()
+
+    def _outline_node_to_block(self, node: OutlineNode, level: int) -> DocBlock:
+        meta = copy.deepcopy(node.meta)
+        if node.instruction:
+            meta['instruction'] = node.instruction
+        if node.constraints:
+            meta['constraints'] = node.constraints.model_dump(exclude_defaults=False)
+        return DocBlock(
+            block_id=node.node_id or '',
+            block_type='heading',
+            text=node.title,
+            level=level,
+            children=[self._outline_node_to_block(c, level + 1) for c in node.children],
+            meta=meta,
+        )
+
+    def _block_to_outline_node(self, block: DocBlock) -> OutlineNode:
+        meta = block.meta or {}
+        constraints_dict = meta.get('constraints', {})
+        constraints = (
+            OutlineNodeConstraints(**constraints_dict) if constraints_dict
+            else OutlineNodeConstraints()
+        )
+        return OutlineNode(
+            node_id=block.block_id,
+            title=block.text,
+            level=block.level or 1,
+            instruction=meta.get('instruction'),
+            constraints=constraints,
+            children=[self._block_to_outline_node(c) for c in block.children
+                      if c.block_type == 'heading'],
+            meta={k: v for k, v in meta.items()
+                  if k not in ('instruction', 'constraints')},
+        )
+
+    @staticmethod
+    def _extract_blocks_text(blocks: List[DocBlock], collector: Optional[List[str]] = None) -> str:
+        if collector is None:
+            collector = []
+        for b in blocks:
+            if b.text:
+                collector.append(b.text)
+            WriterPlanningTools._extract_blocks_text(b.children, collector)
+        return '\n'.join(collector) if collector is not None else ''
