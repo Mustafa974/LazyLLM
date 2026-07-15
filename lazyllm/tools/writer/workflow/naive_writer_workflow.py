@@ -60,53 +60,56 @@ class NaiveWriterWorkflow:
             task=task,
             input_resources=input_resources,
         )
-        writing_context = self.context.create_writing_context(
+        ctx_base = self.context.create_writing_context(
             task=task,
             resource_profiles=self._artifact_ref(resource_profiles, 'resource_profiles'),
         )
         outline = self.planning.generate_outline(
             task=task,
-            context=self._artifact_ref(writing_context, 'writing_context'),
+            context=self._artifact_ref(ctx_base, 'writing_context'),
             resource_profiles=self._artifact_ref(resource_profiles, 'resource_profiles'),
         )
-        writing_context = self.context.update_writing_context(
+        ctx_outline = self.context.update_writing_context(
+            stage='generate_outline',
             artifacts=self._artifact_ref(outline, 'doc_ir'),
-            context=self._artifact_ref(writing_context, 'writing_context'),
+            context=self._artifact_ref(ctx_base, 'writing_context'),
         )
         section_instructions = self.planning.generate_section_instructions(
             outline=self._artifact_ref(outline, 'doc_ir'),
-            context=self._artifact_ref(writing_context, 'writing_context'),
+            context=self._artifact_ref(ctx_outline, 'writing_context'),
         )
         draft_section = self.drafting.generate_draft_section(
             task=task,
             section_instruction=self._artifact_ref(section_instructions, 'section_instructions'),
-            context=self._artifact_ref(writing_context, 'writing_context'),
+            context=self._artifact_ref(ctx_outline, 'writing_context'),
         )
         section_review = self.quality.validate_section(
             draft_section=self._artifact_ref(draft_section, 'draft_section'),
             section_instruction=self._artifact_ref(section_instructions, 'section_instructions'),
-            context=self._artifact_ref(writing_context, 'writing_context'),
+            context=self._artifact_ref(ctx_outline, 'writing_context'),
         )
-        writing_context = self.context.update_writing_context(
+        ctx_section = self.context.update_writing_context(
+            stage='generate_draft_section',
             artifacts=self._artifact_ref(draft_section, 'draft_section'),
-            context=self._artifact_ref(writing_context, 'writing_context'),
+            context=self._artifact_ref(ctx_outline, 'writing_context'),
         )
         draft_document = self.drafting.generate_draft_document(
             draft_sections=self._artifact_ref(draft_section, 'draft_section'),
-            context=self._artifact_ref(writing_context, 'writing_context'),
+            context=self._artifact_ref(ctx_section, 'writing_context'),
             outline=self._artifact_ref(outline, 'doc_ir'),
         )
-        writing_context = self.context.update_writing_context(
+        ctx_draft = self.context.update_writing_context(
+            stage='generate_draft_document',
             artifacts=self._artifact_ref(draft_document, 'doc_ir'),
-            context=self._artifact_ref(writing_context, 'writing_context'),
+            context=self._artifact_ref(ctx_section, 'writing_context'),
         )
         draft_document_review = self.quality.validate_draft_document(
             draft_document=self._artifact_ref(draft_document, 'doc_ir'),
-            context=self._artifact_ref(writing_context, 'writing_context'),
+            context=self._artifact_ref(ctx_draft, 'writing_context'),
         )
         writing_output = self.drafting.generate_writing_output(
             draft=self._artifact_ref(draft_document, 'doc_ir'),
-            context=self._artifact_ref(writing_context, 'writing_context'),
+            context=self._artifact_ref(ctx_draft, 'writing_context'),
         )
         target_doc = task.get('target_document') if isinstance(task, dict) else getattr(task, 'target_document', None)
         write_result = self.resource.write_to_document(
@@ -118,7 +121,7 @@ class NaiveWriterWorkflow:
             'primary_result': writing_output,
             'stage_results': {
                 'resource_profiles': resource_profiles,
-                'writing_context': writing_context,
+                'writing_context': ctx_draft,
                 'outline': outline,
                 'section_instructions': section_instructions,
                 'draft_section': draft_section,
@@ -127,6 +130,9 @@ class NaiveWriterWorkflow:
                 'draft_document_review': draft_document_review,
                 'writing_output': writing_output,
                 'write_result': write_result,
+                'writing_context_outline': ctx_outline,
+                'writing_context_draft_section': ctx_section,
+                'writing_context_draft_document': ctx_draft,
             },
         }
 
@@ -172,17 +178,15 @@ class NaiveWriterWorkflow:
             context=context_ref,
         )
 
-        revised_draft = self.revision.doc_ir_to_draft(
-            doc_ir=self._artifact_ref(patch_result, 'revised_doc_ir'),
-        )
-        revised_draft_ref = self._artifact_ref(revised_draft, 'revised_draft')
+        revised_doc_ir_ref = self._artifact_ref(patch_result, 'revised_doc_ir')
 
         writing_context = self.context.update_writing_context(
-            artifacts=revised_draft_ref,
+            stage='revised_draft',
+            artifacts=revised_doc_ir_ref,
             context=context_ref,
         )
         writing_output = self.drafting.generate_writing_output(
-            draft=revised_draft_ref,
+            draft=revised_doc_ir_ref,
             context=self._artifact_ref(writing_context, 'writing_context'),
         )
 
@@ -196,8 +200,8 @@ class NaiveWriterWorkflow:
                 'patch_review': patch_review,
                 'patch_result': patch_result,
                 'revised_doc_ir': self._artifact_ref(patch_result, 'revised_doc_ir'),
-                'revised_draft': revised_draft,
                 'writing_context': writing_context,
+                'writing_context_revised_draft': writing_context,
                 'writing_output': writing_output,
             },
         }

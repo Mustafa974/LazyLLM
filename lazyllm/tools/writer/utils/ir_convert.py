@@ -67,10 +67,9 @@ def docir_blocks_to_outline_nodes(blocks: List[DocBlock]) -> List[OutlineNode]:
 
 def docir_to_outline(source: DocIR) -> WritingOutline:
     '''Convert a DocIR into a WritingOutline (no persistence).'''
-    if (source.meta or {}).get('source_kind') != 'outline':
+    if source.source_kind != 'outline':
         raise ValueError(
-            f'Expected source_kind="outline" in DocIR meta, '
-            f'got {source.meta.get("source_kind")!r}. '
+            f'Expected source_kind="outline", got {source.source_kind!r}. '
             f'Use only for DocIR artifacts produced by outline_to_doc_ir.'
         )
     nodes = docir_blocks_to_outline_nodes(source.blocks)
@@ -127,10 +126,9 @@ def draft_to_docir_blocks(draft: DraftDocument) -> List[DocBlock]:
 
 def docir_to_draft(source: DocIR) -> DraftDocument:
     '''Convert a DocIR into a DraftDocument (no persistence).'''
-    if (source.meta or {}).get('source_kind') != 'draft_document':
+    if source.source_kind != 'draft_document':
         raise ValueError(
-            f'Expected source_kind="draft_document" in DocIR meta, '
-            f'got {source.meta.get("source_kind")!r}. '
+            f'Expected source_kind="draft_document", got {source.source_kind!r}. '
             f'Use only for DocIR artifacts produced from DraftDocument.'
         )
     root = DraftSection()

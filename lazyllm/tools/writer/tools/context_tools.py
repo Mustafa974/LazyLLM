@@ -16,7 +16,7 @@ from ..data_models.docir import DocBlock, DocIR
 from ..utils.ir_convert import docir_to_draft, docir_to_outline
 from ..data_models.resource import ResourceProfile
 from ..data_models.task import WritingTask
-from ..data_models.writing import DraftDocument, DraftSection, WritingOutline
+from ..data_models.writing import DraftSection
 from ..prompts.context import CONTENT_SUMMARY_PROMPT
 
 
@@ -73,6 +73,8 @@ class WriterContextTools(WriterToolBase):
         self,
         artifacts: Any = None,
         context: Any = None,
+        *,
+        stage: str = '',
     ) -> dict:
         writing_context = self._unified_model(context, WritingContext)
 
@@ -94,30 +96,23 @@ class WriterContextTools(WriterToolBase):
             raw = self._unified_raw_data(artifact)
             kind = self._resolve_artifact_kind(artifact) or 'content'
 
-            if kind == 'WritingOutline':
-                writing_context.outline = self._unified_model(raw, WritingOutline)
-
-            elif kind == 'DocIR':
+            if kind == 'DocIR':
                 source = self._unified_model(raw, DocIR)
-                source_kind = (source.meta or {}).get('source_kind')
-                if source_kind == 'outline':
+                summary = self._ensure_document_summary(writing_context, raw)
+                self._append_context_update(writing_context, summary, kind, stage=stage)
+                if source.source_kind == 'outline':
                     writing_context.outline = docir_to_outline(source)
-                elif source_kind == 'draft_document':
+                elif source.source_kind == 'draft_document':
                     writing_context.draft_document = docir_to_draft(source)
 
             elif kind == 'DraftSection':
                 summary = self._ensure_document_summary(writing_context, raw)
-                self._append_context_update(writing_context, summary, kind)
+                self._append_context_update(writing_context, summary, kind, stage=stage)
                 writing_context.draft_sections.append(self._unified_model(raw, DraftSection))
-
-            elif kind == 'DraftDocument':
-                summary = self._ensure_document_summary(writing_context, raw)
-                self._append_context_update(writing_context, summary, kind)
-                writing_context.draft_document = self._unified_model(raw, DraftDocument)
 
             else:
                 summary = self._ensure_document_summary(writing_context, raw)
-                self._append_context_update(writing_context, summary, kind)
+                self._append_context_update(writing_context, summary, kind, stage=stage)
 
             content_kind = content_kind or kind
 
@@ -126,6 +121,10 @@ class WriterContextTools(WriterToolBase):
                 'source': 'update_writing_context',
             }
         )
+
+        artifact_filenames = {
+            'writing_context': f'context_{stage}.json' if stage else 'context.json',
+        }
 
         result = self._save_artifacts(
             {'writing_context': writing_context},
@@ -140,7 +139,9 @@ class WriterContextTools(WriterToolBase):
                 'doc_id': writing_context.doc_id,
                 'last_updated_from': content_kind or 'none',
                 'has_outline': writing_context.outline is not None,
+                'stage': stage or None,
             },
+            artifact_filenames=artifact_filenames,
         )
         return result.model_dump()
 
@@ -154,10 +155,12 @@ class WriterContextTools(WriterToolBase):
             writing_context.document_summary.summary = content_summary
         return content_summary
 
-    def _append_context_update(self, writing_context: WritingContext, summary: str, kind: str) -> None:
+    def _append_context_update(self, writing_context: WritingContext, summary: str, kind: str,
+                                *, stage: str = '') -> None:
         writing_context.meta.setdefault('context_updates', []).append({
             'summary': summary,
             'content_kind': kind,
+            'stage_name': stage,
             'timestamp': datetime.now().astimezone().isoformat(),
         })
 

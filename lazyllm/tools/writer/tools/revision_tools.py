@@ -326,7 +326,7 @@ class WriterRevisionTools(WriterToolBase):
             plain_text=self.blocks_to_plain_text(blocks),
             adapter='',
         )
-        doc_ir.meta['source_kind'] = 'draft_document'
+        doc_ir.source_kind = 'draft_document'
         return self._save_artifacts(
             {'doc_ir': doc_ir},
             step_name='draft_to_doc_ir',

@@ -46,4 +46,5 @@ class DocIR(ArtifactModel):
     plain_text: Optional[str] = None
     revision: Optional[str] = None
     adapter: str = ''
+    source_kind: Optional[str] = None
     meta: Dict[str, Any] = Field(default_factory=dict)

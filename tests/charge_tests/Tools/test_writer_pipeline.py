@@ -174,11 +174,48 @@ def test_write_workflow_e2e():
     assert isinstance(review.result.is_passed, bool)
     assert 0 <= review.result.score <= 100
 
-    # --- Step 7: writing_context (updated) ---
-    ctx2 = _load_stage(stages, 'writing_context', WritingContext)
-    assert ctx2 is not None
-    assert ctx2.document_summary.summary
-    assert len(ctx2.meta.get('context_updates', [])) >= 1
+    # --- Step 7: writing_context (final — generate_draft_document stage) ---
+    ctx_final = _load_stage(stages, 'writing_context', WritingContext)
+    assert ctx_final is not None
+    assert ctx_final.document_summary.summary
+    assert len(ctx_final.meta.get('context_updates', [])) >= 1
+
+    # --- stage-aware writing_context: three separate files, not overwritten ---
+    ctx_outline_meta = (stages.get('writing_context_outline') or {}).get('metadata', {})
+    ctx_outline_path = ctx_outline_meta.get('artifact_paths', {}).get('writing_context', '')
+    assert 'generate_outline' in ctx_outline_path
+    ctx_outline = load_artifact_json(ctx_outline_path, WritingContext)
+    assert ctx_outline is not None
+    assert ctx_outline.outline is not None
+    assert len(ctx_outline.meta.get('context_updates', [])) >= 1
+    assert ctx_outline.meta['context_updates'][0].get('stage_name') == 'generate_outline'
+
+    ctx_sec_meta = (stages.get('writing_context_draft_section') or {}).get('metadata', {})
+    ctx_sec_path = ctx_sec_meta.get('artifact_paths', {}).get('writing_context', '')
+    assert 'generate_draft_section' in ctx_sec_path
+    ctx_section = load_artifact_json(ctx_sec_path, WritingContext)
+    assert ctx_section is not None
+    assert len(ctx_section.draft_sections) >= 1
+    assert len(ctx_section.meta.get('context_updates', [])) >= 1
+    # context_updates are chained; at least one entry from this stage
+    stage_names = [e.get('stage_name') for e in ctx_section.meta.get('context_updates', [])]
+    assert 'generate_draft_section' in stage_names
+
+    ctx_draft_meta = (stages.get('writing_context_draft_document') or {}).get('metadata', {})
+    ctx_draft_path = ctx_draft_meta.get('artifact_paths', {}).get('writing_context', '')
+    assert 'generate_draft_document' in ctx_draft_path
+    ctx_draft = load_artifact_json(ctx_draft_path, WritingContext)
+    assert ctx_draft is not None
+    assert ctx_draft.draft_document is not None
+    # All three stages recorded in context_updates (chained)
+    draft_stage_names = [e.get('stage_name') for e in ctx_draft.meta.get('context_updates', [])]
+    assert 'generate_outline' in draft_stage_names
+    assert 'generate_draft_section' in draft_stage_names
+    assert 'generate_draft_document' in draft_stage_names
+
+    # All three files distinct
+    paths = {ctx_outline_path, ctx_sec_path, ctx_draft_path}
+    assert len(paths) == 3, f'writing_context files should be distinct, got {paths}'
 
     # --- Step 8: draft_document (stored as DocIR) ---
     draft_doc_ir = _load_stage(stages, 'draft_document', DocIR)
@@ -354,11 +391,13 @@ def test_revise_workflow_e2e():
     assert any('financial' in t.lower() for t in revised_text_by_id.values())
 
     # --- rebuild + writing_output ---
-    revised_draft = _load_stage(stages, 'revised_draft', DraftDocument)
-    assert revised_draft is not None and revised_draft.sections and revised_draft.title
-
     revised_context = _load_stage(stages, 'writing_context', WritingContext)
     assert revised_context is not None and revised_context.draft_document is not None
+
+    # stage-aware: writing_context file named with stage
+    rev_ctx_meta = (stages.get('writing_context_revised_draft') or {}).get('metadata', {})
+    rev_ctx_path = rev_ctx_meta.get('artifact_paths', {}).get('writing_context', '')
+    assert 'revised_draft' in rev_ctx_path
 
     output = _load_stage(stages, 'writing_output', WritingOutput)
     assert output is not None and output.output_format == 'markdown'

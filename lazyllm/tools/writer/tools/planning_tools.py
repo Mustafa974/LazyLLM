@@ -348,7 +348,7 @@ class WriterPlanningTools(WriterToolBase):
         })
         kwargs.setdefault('artifact_meta', {})
         kwargs['artifact_meta'].setdefault('outline_id', source.outline_id)
-        doc_ir.meta['source_kind'] = 'outline'
+        doc_ir.source_kind = 'outline'
         return self._save_artifacts(
             {'doc_ir': doc_ir},
             primary_key='doc_ir',

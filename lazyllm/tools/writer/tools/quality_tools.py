@@ -110,7 +110,7 @@ class WriterQualityTools(WriterToolBase):
         context: Any,
     ) -> dict:
         raw = self._unified_raw_data(draft_document)
-        if isinstance(raw, dict) and (raw.get('meta') or {}).get('source_kind') == 'draft_document':
+        if isinstance(raw, dict) and raw.get('source_kind') == 'draft_document':
             document = docir_to_draft(self._unified_model(draft_document, DocIR))
         else:
             document = self._unified_model(draft_document, DraftDocument)

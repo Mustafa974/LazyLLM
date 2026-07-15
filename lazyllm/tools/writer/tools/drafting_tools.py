@@ -117,7 +117,7 @@ class WriterDraftingTools(WriterToolBase):
             plain_text='\n\n'.join(b.text for b in blocks if b.text.strip()) or '',
             adapter='',
         )
-        doc_ir.meta['source_kind'] = 'draft_document'
+        doc_ir.source_kind = 'draft_document'
         return self._save_artifacts(
             {'doc_ir': doc_ir},
             step_name='generate_draft_document',
@@ -149,7 +149,7 @@ class WriterDraftingTools(WriterToolBase):
 
         writing_context = self._unified_model(context, WritingContext)
         raw = self._unified_raw_data(draft)
-        if isinstance(raw, dict) and (raw.get('meta') or {}).get('source_kind') == 'draft_document':
+        if isinstance(raw, dict) and raw.get('source_kind') == 'draft_document':
             draft_document = docir_to_draft(self._unified_model(draft, DocIR))
         else:
             draft_document = self._unified_draft_document(draft, writing_context)
