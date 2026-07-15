@@ -6,7 +6,9 @@ from ..data_models.context import WritingContext
 from ..data_models.quality import AuditResult, ReviewReport
 from ..data_models.revision import PatchSet
 from ..data_models.task import WritingTask
+from ..data_models.docir import DocIR
 from ..data_models.writing import DraftDocument, SectionInstruction, SectionInstructionList
+from ..utils.ir_convert import docir_to_draft
 from ..prompts.quality import (
     VALIDATE_DRAFT_DOCUMENT_PROMPT,
     VALIDATE_PATCH_SET_PROMPT,
@@ -107,7 +109,11 @@ class WriterQualityTools(WriterToolBase):
         draft_document: Any,
         context: Any,
     ) -> dict:
-        document = self._unified_model(draft_document, DraftDocument)
+        raw = self._unified_raw_data(draft_document)
+        if isinstance(raw, dict) and (raw.get('meta') or {}).get('source_kind') == 'draft_document':
+            document = docir_to_draft(self._unified_model(draft_document, DocIR))
+        else:
+            document = self._unified_model(draft_document, DraftDocument)
         writing_context = self._unified_model(context, WritingContext)
 
         prompt = VALIDATE_DRAFT_DOCUMENT_PROMPT.format(

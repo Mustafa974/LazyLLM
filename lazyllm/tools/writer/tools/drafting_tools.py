@@ -6,7 +6,7 @@ from .base import WriterToolBase
 from ..data_models.context import WritingContext
 from ..data_models.task import WritingTask
 from ..data_models.docir import DocIR
-from ..utils.ir_convert import docir_to_outline
+from ..utils.ir_convert import docir_to_draft, docir_to_outline, draft_to_docir_blocks
 from ..data_models.writing import (
     DraftBlock,
     DraftDocument,
@@ -109,10 +109,19 @@ class WriterDraftingTools(WriterToolBase):
             },
         )
 
-        result = self._save_artifacts(
-            {'draft_document': draft_document},
+        blocks = draft_to_docir_blocks(draft_document)
+        doc_ir = DocIR(
+            doc_id=draft_document.draft_id,
+            title=draft_document.title,
+            blocks=blocks,
+            plain_text='\n\n'.join(b.text for b in blocks if b.text.strip()) or '',
+            adapter='',
+        )
+        doc_ir.meta['source_kind'] = 'draft_document'
+        return self._save_artifacts(
+            {'doc_ir': doc_ir},
             step_name='generate_draft_document',
-            primary_key='draft_document',
+            primary_key='doc_ir',
             context_key=None,
             summary='Generated draft document.',
             counts={
@@ -127,8 +136,7 @@ class WriterDraftingTools(WriterToolBase):
                 'outline_title': writing_outline.title if writing_outline else None,
                 'draft_section_count': len(draft_document.sections),
             },
-        )
-        return result.model_dump()
+        ).model_dump()
 
     def generate_writing_output(
         self,
@@ -140,7 +148,11 @@ class WriterDraftingTools(WriterToolBase):
             raise ValueError('Only markdown output is supported for now.')
 
         writing_context = self._unified_model(context, WritingContext)
-        draft_document = self._unified_draft_document(draft, writing_context)
+        raw = self._unified_raw_data(draft)
+        if isinstance(raw, dict) and (raw.get('meta') or {}).get('source_kind') == 'draft_document':
+            draft_document = docir_to_draft(self._unified_model(draft, DocIR))
+        else:
+            draft_document = self._unified_draft_document(draft, writing_context)
         content = self._render_draft_document_markdown(draft_document)
         writing_output = WritingOutput(
             output_id=self._default_writing_output_id(draft_document, writing_context),

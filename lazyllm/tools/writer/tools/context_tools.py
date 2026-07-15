@@ -13,7 +13,7 @@ from ..data_models.context import (
     WritingContext,
 )
 from ..data_models.docir import DocBlock, DocIR
-from ..utils.ir_convert import docir_to_outline
+from ..utils.ir_convert import docir_to_draft, docir_to_outline
 from ..data_models.resource import ResourceProfile
 from ..data_models.task import WritingTask
 from ..data_models.writing import DraftDocument, DraftSection, WritingOutline
@@ -99,8 +99,11 @@ class WriterContextTools(WriterToolBase):
 
             elif kind == 'DocIR':
                 source = self._unified_model(raw, DocIR)
-                if (source.meta or {}).get('source_kind') == 'outline':
+                source_kind = (source.meta or {}).get('source_kind')
+                if source_kind == 'outline':
                     writing_context.outline = docir_to_outline(source)
+                elif source_kind == 'draft_document':
+                    writing_context.draft_document = docir_to_draft(source)
 
             elif kind == 'DraftSection':
                 summary = self._ensure_document_summary(writing_context, raw)

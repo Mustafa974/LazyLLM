@@ -97,15 +97,15 @@ class NaiveWriterWorkflow:
             outline=self._artifact_ref(outline, 'doc_ir'),
         )
         writing_context = self.context.update_writing_context(
-            artifacts=self._artifact_ref(draft_document, 'draft_document'),
+            artifacts=self._artifact_ref(draft_document, 'doc_ir'),
             context=self._artifact_ref(writing_context, 'writing_context'),
         )
         draft_document_review = self.quality.validate_draft_document(
-            draft_document=self._artifact_ref(draft_document, 'draft_document'),
+            draft_document=self._artifact_ref(draft_document, 'doc_ir'),
             context=self._artifact_ref(writing_context, 'writing_context'),
         )
         writing_output = self.drafting.generate_writing_output(
-            draft=self._artifact_ref(draft_document, 'draft_document'),
+            draft=self._artifact_ref(draft_document, 'doc_ir'),
             context=self._artifact_ref(writing_context, 'writing_context'),
         )
         target_doc = task.get('target_document') if isinstance(task, dict) else getattr(task, 'target_document', None)

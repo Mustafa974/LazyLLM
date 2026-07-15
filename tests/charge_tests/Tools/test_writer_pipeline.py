@@ -180,11 +180,11 @@ def test_write_workflow_e2e():
     assert ctx2.document_summary.summary
     assert len(ctx2.meta.get('context_updates', [])) >= 1
 
-    # --- Step 8: draft_document ---
-    doc = _load_stage(stages, 'draft_document', DraftDocument)
-    assert doc is not None
-    assert doc.title
-    assert len(doc.sections) >= 1
+    # --- Step 8: draft_document (stored as DocIR) ---
+    draft_doc_ir = _load_stage(stages, 'draft_document', DocIR)
+    assert draft_doc_ir is not None
+    assert draft_doc_ir.title
+    assert len(draft_doc_ir.blocks) >= 1
 
     # --- Step 9: writing_output ---
     output = _load_stage(stages, 'writing_output', WritingOutput)

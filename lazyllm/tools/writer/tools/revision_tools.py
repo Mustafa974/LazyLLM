@@ -6,7 +6,6 @@ from ..data_models.context import WritingContext
 from ..data_models.docir import Anchor, DocBlock, DocIR
 from ..data_models.revision import (
     BLOCK_META_FIELDS,
-    HEADING_PATH_KEY,
     SECTION_META_FIELDS,
     LocateResult,
     ModifyInstruction,
@@ -15,6 +14,7 @@ from ..data_models.revision import (
     PatchResult,
     PatchSet,
 )
+from ..utils.ir_convert import draft_to_docir_blocks, docir_to_draft
 from ..data_models.task import WritingTask
 from ..data_models.writing import DraftBlock, DraftDocument, DraftSection
 from ..prompts import (
@@ -318,15 +318,15 @@ class WriterRevisionTools(WriterToolBase):
     def draft_to_doc_ir(self, draft: Any) -> dict:
         '''Convert a DraftDocument into a DocIR artifact.'''
         source_draft = self._unified_model(draft, DraftDocument)
-        blocks: List[DocBlock] = []
-        self._flatten_sections(source_draft.sections, 1, [], blocks)
+        blocks = draft_to_docir_blocks(source_draft)
         doc_ir = DocIR(
             doc_id=source_draft.draft_id,
             title=source_draft.title,
             blocks=blocks,
             plain_text=self.blocks_to_plain_text(blocks),
-            adapter='draft_document',
+            adapter='',
         )
+        doc_ir.meta['source_kind'] = 'draft_document'
         return self._save_artifacts(
             {'doc_ir': doc_ir},
             step_name='draft_to_doc_ir',
@@ -342,48 +342,16 @@ class WriterRevisionTools(WriterToolBase):
 
     def doc_ir_to_draft(self, doc_ir: Any) -> dict:
         '''Convert a DocIR into a DraftDocument artifact.'''
-        source_doc = self._unified_model(doc_ir, DocIR)
-        # Virtual root absorbs heading-less leading paragraphs; null heading level defaults to 1.
-        root = DraftSection()
-        stack: List[Tuple[int, DraftSection]] = [(0, root)]
-        for block in source_doc.blocks:
-            if block.block_type == 'heading':
-                level = block.level if block.level is not None else 1
-                while len(stack) > 1 and stack[-1][0] >= level:
-                    stack.pop()
-                meta = block.meta or {}
-                section = DraftSection(
-                    **{field: meta.get(field) for field in SECTION_META_FIELDS},
-                    title=block.text or None,
-                )
-                stack[-1][1].sub_sections.append(section)
-                stack.append((level, section))
-            else:
-                parent = stack[-1][1]
-                meta = block.meta or {}
-                parent.blocks.append(DraftBlock(
-                    block_id=block.block_id,
-                    section_id=parent.section_id,
-                    **{field: meta.get(field) for field in BLOCK_META_FIELDS},
-                    content=block.text,
-                ))
-        sections = list(root.sub_sections)
-        if root.blocks:
-            sections.insert(0, DraftSection(blocks=root.blocks))
-        revised_draft = DraftDocument(
-            draft_id=source_doc.doc_id,
-            title=source_doc.title,
-            sections=sections,
-        )
+        revised_draft = docir_to_draft(self._unified_model(doc_ir, DocIR))
         return self._save_artifacts(
             {'revised_draft': revised_draft},
             step_name='doc_ir_to_draft',
             primary_key='revised_draft',
             context_key=None,
             summary='Converted DocIR into DraftDocument.',
-            artifact_meta={'doc_id': source_doc.doc_id},
+            artifact_meta={'doc_id': revised_draft.draft_id},
             artifact_filenames={
-                'revised_draft': f'revised_draft_{source_doc.doc_id or "document"}.json',
+                'revised_draft': f'revised_draft_{revised_draft.draft_id or "document"}.json',
             },
         ).model_dump()
 
@@ -446,65 +414,3 @@ class WriterRevisionTools(WriterToolBase):
     def blocks_to_plain_text(self, blocks: List[DocBlock]) -> Optional[str]:
         return '\n\n'.join(b.text for b in blocks if b.text.strip()) or None
 
-    def _flatten_sections(
-        self,
-        sections: List[DraftSection],
-        depth: int,
-        heading_path: List[str],
-        blocks: List[DocBlock],
-    ) -> None:
-        for section in sections:
-            current_path = list(heading_path)
-            if section.title:
-                current_path.append(section.title)
-            blocks.append(self._heading_doc_block(section, depth, current_path, len(blocks)))
-            for idx, block in enumerate(section.blocks, start=1):
-                blocks.append(self._paragraph_doc_block(section, block, current_path, idx, len(blocks)))
-            self._flatten_sections(section.sub_sections, depth + 1, current_path, blocks)
-
-    def _heading_doc_block(
-        self,
-        section: DraftSection,
-        depth: int,
-        heading_path: List[str],
-        fallback_index: int,
-    ) -> DocBlock:
-        block_id = f'{section.section_id}::heading' if section.section_id else f'block-{fallback_index + 1}'
-        meta: Dict[str, Any] = {HEADING_PATH_KEY: list(heading_path)}
-        for field in SECTION_META_FIELDS:
-            val = getattr(section, field)
-            if val:
-                meta[field] = val
-        return DocBlock(
-            block_id=block_id,
-            block_type='heading',
-            text=section.title or '',
-            level=depth,
-            meta=meta,
-        )
-
-    def _paragraph_doc_block(
-        self,
-        section: DraftSection,
-        block: DraftBlock,
-        heading_path: List[str],
-        local_index: int,
-        fallback_index: int,
-    ) -> DocBlock:
-        if block.block_id:
-            block_id = block.block_id
-        elif section.section_id:
-            block_id = f'{section.section_id}::block-{local_index}'
-        else:
-            block_id = f'block-{fallback_index + 1}'
-        meta: Dict[str, Any] = {HEADING_PATH_KEY: list(heading_path)}
-        for field in BLOCK_META_FIELDS:
-            val = getattr(block, field)
-            if val:
-                meta[field] = val
-        return DocBlock(
-            block_id=block_id,
-            block_type='paragraph',
-            text=block.content,
-            meta=meta,
-        )
