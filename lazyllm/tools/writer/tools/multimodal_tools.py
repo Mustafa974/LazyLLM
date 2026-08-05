@@ -13,7 +13,12 @@ from lazyllm.components.formatter import encode_query_with_filepaths
 from lazyllm.thirdparty import PIL
 
 from .base import WriterToolBase
-from ..data_models.multimodal import MediaAsset, MediaAssetLibrary, VisualPlan
+from ..data_models.multimodal import (
+    MediaAsset,
+    MediaAssetLibrary,
+    VisualPlan,
+    _VISUAL_STRATEGY_ORDER,
+)
 from ..data_models.task import InputResource, WritingTask
 from ..prompts import RESOLVE_VISUAL_NEEDS_PROMPT, VISION_SUMMARY_PROMPT
 
@@ -110,16 +115,20 @@ class WriterMultimodalTools(WriterToolBase):
             if library.visual_need_asset_ids.get(need_id):
                 continue
             need = needs[need_id]
-            if need.visual_type in {'image', 'diagram'}:
-                acquisition_requests.append({
-                    'instruction_id': need_id,
-                    'visual_type': need.visual_type,
-                    'purpose': need.purpose,
-                    'strategies': ['image_generation'],
-                    'required': need.required,
-                })
-            else:
+            strategies = list(_VISUAL_STRATEGY_ORDER.get(need.visual_type, []))
+            if need.preferred_strategy in strategies:
+                strategies.remove(need.preferred_strategy)
+                strategies.insert(0, need.preferred_strategy)
+            if not strategies:
                 warnings.append(f'Visual need {need_id!r} has no MVP acquisition strategy.')
+                continue
+            acquisition_requests.append({
+                'instruction_id': need_id,
+                'visual_type': need.visual_type,
+                'purpose': need.purpose,
+                'strategies': strategies,
+                'required': need.required,
+            })
 
         return {
             'media_assets': library,
