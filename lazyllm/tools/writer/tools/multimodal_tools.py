@@ -4,7 +4,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
@@ -78,7 +78,12 @@ class WriterMultimodalTools(WriterToolBase):
             warnings=warnings,
         ).model_dump()
 
-    def resolve_visual_needs(self, visual_plan: Any, media_assets: Any) -> Dict[str, Any]:
+    def resolve_visual_needs(
+        self,
+        visual_plan: Any,
+        media_assets: Any,
+        allowed_strategies: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         '''Reuse matching assets and request generated images for the remaining needs.'''
         plan = self._unified_model(visual_plan, VisualPlan)
         library = self._unified_model(media_assets, MediaAssetLibrary).model_copy(deep=True)
@@ -115,10 +120,7 @@ class WriterMultimodalTools(WriterToolBase):
             if library.visual_need_asset_ids.get(need_id):
                 continue
             need = needs[need_id]
-            strategies = list(_VISUAL_STRATEGY_ORDER.get(need.visual_type, []))
-            if need.preferred_strategy in strategies:
-                strategies.remove(need.preferred_strategy)
-                strategies.insert(0, need.preferred_strategy)
+            strategies = self._visual_strategies(need, allowed_strategies)
             if not strategies:
                 warnings.append(f'Visual need {need_id!r} has no MVP acquisition strategy.')
                 continue
@@ -135,6 +137,16 @@ class WriterMultimodalTools(WriterToolBase):
             'acquisition_requests': acquisition_requests,
             'warnings': warnings,
         }
+
+    @staticmethod
+    def _visual_strategies(need: Any, allowed_strategies: Optional[List[str]]) -> List[str]:
+        strategies = list(_VISUAL_STRATEGY_ORDER.get(need.visual_type, []))
+        if allowed_strategies is not None:
+            strategies = [strategy for strategy in strategies if strategy in allowed_strategies]
+        if need.preferred_strategy in strategies:
+            strategies.remove(need.preferred_strategy)
+            strategies.insert(0, need.preferred_strategy)
+        return strategies
 
     def materialize_acquired_media(
         self,
