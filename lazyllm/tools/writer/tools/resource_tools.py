@@ -288,11 +288,11 @@ class WriterResourceTools(WriterToolBase):
             raise TypeError(f'{type(fs).__name__} does not support {method_name}().')
         native_blocks = adapter.ir_to_blocks(
             document, media_assets=media_library if source_document is not None else None)
+        if document.title:
+            self._update_document_title(fs, document_id, document.title, document.revision)
         if not native_blocks:
             warnings.append('No publishable blocks remain after media filtering.')
             return self._save_write_result(document_id, protocol, locator, 0, warnings)
-        if document.title:
-            self._update_document_title(fs, document_id, document.title, document.revision)
         write_blocks(document_id, native_blocks)
         return self._save_write_result(document_id, protocol, locator, len(native_blocks), warnings)
 
