@@ -3,6 +3,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from copy import copy
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,10 +11,12 @@ import pytest
 
 from lazyllm.common import FileSystemQueue
 from lazyllm.module.module import ModuleBase
+from lazyllm.thirdparty import PIL
 from lazyllm.tools.writer.data_models import (
     ContentRef,
     DocumentSummary,
     MaterialStyle,
+    MediaAssetLibrary,
     ResourceProfile,
     WriterBlock,
     WriterDocument,
@@ -37,6 +40,7 @@ from lazyllm.tools.writer.data_models.planning import (
 from lazyllm.tools.writer.tools.context_tools import WriterContextTools
 from lazyllm.tools.writer.tools.drafting_tools import WriterDraftingTools
 from lazyllm.tools.writer.tools.base import WriterToolBase
+from lazyllm.tools.writer.tools.multimodal_tools import WriterMultimodalTools
 from lazyllm.tools.writer.tools.planning_tools import WriterPlanningTools
 from lazyllm.tools.writer.tools.quality_tools import WriterQualityTools
 from lazyllm.tools.writer.tools.resource_tools import WriterResourceTools
@@ -275,7 +279,7 @@ def _route_doc_fs(fs, real_path='~docx/doc-1'):
         yield
 
 
-def _call_document_to_docir(adapter, artifact_store):
+def _call_document_to_docir(adapter, artifact_store, media_store=''):
     target_document = {
         'uri': 'feishu://~docx/doc-1',
         'adapter': 'feishu',
@@ -285,7 +289,16 @@ def _call_document_to_docir(adapter, artifact_store):
 
     with _route_doc_fs(adapter):
         tool = WriterResourceTools(artifact_store=artifact_store)
-        return tool.document_to_docir(target_document=target_document)
+        return tool.document_to_docir(
+            target_document=target_document,
+            media_store=media_store,
+        )
+
+
+def _png_bytes():
+    buffer = BytesIO()
+    PIL.Image.new('RGB', (3, 2), color=(12, 34, 56)).save(buffer, format='PNG')
+    return buffer.getvalue()
 
 
 def _make_final_writer_document(content='# Local output', title=''):
@@ -961,6 +974,157 @@ def test_document_to_docir():
         assert document.title == '飞书文档'
         assert document.provider_binding['document_id'] == 'doc-1'
         assert [block.content for block in document.blocks] == ['标题', '正文']
+
+
+def test_feishu_document_images_enter_media_library_and_bind_source_ir():
+    pytest.importorskip('fsspec')
+    fs = _make_doc_adapter()
+    fs.get_doc_blocks.return_value = [
+        {
+            'block_id': 'heading-1',
+            'block_type': 3,
+            'parent_id': 'doc-1',
+            'heading1': {'elements': [{'text_run': {'content': '系统设计'}}]},
+            'plain_text': '系统设计',
+        },
+        {
+            'block_id': 'image-1',
+            'block_type': 27,
+            'parent_id': 'doc-1',
+            'image': {
+                'token': 'boxcn-image-1',
+                'width': 1280,
+                'height': 720,
+                'caption': {'content': '系统架构图'},
+            },
+            'plain_text': '',
+        },
+        {
+            'block_id': 'paragraph-1',
+            'block_type': 2,
+            'parent_id': 'doc-1',
+            'text': {'elements': [{'text_run': {'content': '架构说明'}}]},
+            'plain_text': '架构说明',
+        },
+    ]
+    fs._download_docx_media.return_value = {
+        'content': _png_bytes(),
+        'mime_type': 'image/png',
+        'file_name': 'architecture.png',
+    }
+
+    with tempfile.TemporaryDirectory() as directory:
+        read_root = os.path.join(directory, 'read')
+        media_source = os.path.join(directory, 'source-media')
+        os.makedirs(read_root)
+        read_result = _call_document_to_docir(fs, read_root, media_source)
+        document = load_artifact_json(read_result['artifact_path'], WriterDocument)
+        resources = load_artifact_json(
+            read_result['metadata']['artifact_paths']['media_input_resources'],
+            validate_schema=False,
+        )
+
+        assert len(resources) == 1
+        resource = resources[0]
+        assert Path(resource['uri']).is_file()
+        assert resource['meta']['origins'][0] == {
+            'provider': 'feishu',
+            'source_kind': 'feishu_docx_image',
+            'source_uri': 'feishu://~docx/doc-1',
+            'document_id': 'doc-1',
+            'block_id': 'image-1',
+            'parent_block_id': 'doc-1',
+            'file_token': 'boxcn-image-1',
+            'caption': '系统架构图',
+            'heading_path': ['系统设计'],
+            'context_before': '系统设计',
+            'context_after': '架构说明',
+            'declared_width': 1280,
+            'declared_height': 720,
+        }
+
+        collect_root = os.path.join(directory, 'collect')
+        result = WriterMultimodalTools(artifact_store=collect_root).collect_available_media(
+            task=WritingTask(task_id='task-1', query='重写文档', task_type='write'),
+            input_resources=resources,
+            source_document=document,
+        )
+        library = load_artifact_json(
+            result['metadata']['artifact_paths']['media_assets'],
+            MediaAssetLibrary,
+        )
+        bound = load_artifact_json(
+            result['metadata']['artifact_paths']['source_document'],
+            WriterDocument,
+        )
+
+    assert len(library.assets) == 1
+    asset = next(iter(library.assets.values()))
+    assert asset.source_type == 'input_resource'
+    assert asset.caption == '系统架构图'
+    assert asset.meta['width'] == 3
+    assert asset.meta['height'] == 2
+    assert asset.meta['origins'][0]['block_id'] == 'image-1'
+    image_block = next(block for block in bound.iter_blocks() if block.type == 'image')
+    assert image_block.references == [{'type': 'media_asset', 'id': asset.media_asset_id}]
+
+
+def test_duplicate_feishu_images_share_asset_and_merge_origins():
+    with tempfile.TemporaryDirectory() as directory:
+        source = Path(directory) / 'source.png'
+        source.write_bytes(_png_bytes())
+        origins = [
+            {
+                'provider': 'feishu',
+                'document_id': 'doc-1',
+                'block_id': block_id,
+            }
+            for block_id in ('image-1', 'image-2')
+        ]
+        resources = [
+            InputResource(
+                resource_id=origin['block_id'],
+                resource_type='image',
+                uri=str(source),
+                meta={'source_type': 'input_resource', 'origins': [origin]},
+            )
+            for origin in origins
+        ]
+
+        result = WriterMultimodalTools(artifact_store=directory).collect_available_media(
+            task=WritingTask(task_id='task-1', query='写作', task_type='write'),
+            input_resources=resources,
+        )
+        library = load_artifact_json(result['artifact_path'], MediaAssetLibrary)
+
+    assert len(library.assets) == 1
+    asset = next(iter(library.assets.values()))
+    assert asset.meta['origins'] == origins
+
+
+def test_feishu_image_download_failure_preserves_document():
+    pytest.importorskip('fsspec')
+    fs = _make_doc_adapter()
+    fs.get_doc_blocks.return_value.append({
+        'block_id': 'image-1',
+        'block_type': 27,
+        'parent_id': 'doc-1',
+        'image': {'token': 'boxcn-image-1'},
+        'plain_text': '',
+    })
+    fs._download_docx_media.side_effect = PermissionError('forbidden')
+
+    with tempfile.TemporaryDirectory() as directory:
+        result = _call_document_to_docir(fs, directory, os.path.join(directory, 'media'))
+        document = load_artifact_json(result['artifact_path'], WriterDocument)
+        resources = load_artifact_json(
+            result['metadata']['artifact_paths']['media_input_resources'],
+            validate_schema=False,
+        )
+
+    assert [block.content for block in document.blocks[:2]] == ['标题', '正文']
+    assert resources == []
+    assert 'PermissionError: forbidden' in result['metadata']['warnings'][0]
 
 
 @pytest.mark.parametrize(

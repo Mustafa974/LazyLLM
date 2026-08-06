@@ -73,6 +73,42 @@ def get_markdown_outline_targets(
     return title, targets
 
 
+def extract_markdown_image_references(markdown: str) -> List[Dict[str, Any]]:
+    '''Extract Markdown image references together with nearby writing context.'''
+    tokens = mistune.create_markdown(renderer='ast', plugins=['table'])(markdown or '')
+    block_texts = [_markdown_context_text(token).strip() for token in tokens]
+    heading_path: List[str] = []
+    references: List[Dict[str, Any]] = []
+
+    for block_index, token in enumerate(tokens):
+        if token.get('type') == 'heading':
+            level = int((token.get('attrs') or {}).get('level') or 1)
+            heading_path = heading_path[:max(level - 1, 0)]
+            heading_path.append(_markdown_token_text(token).strip())
+
+        context_before = next((text for text in reversed(block_texts[:block_index]) if text), '')
+        context_after = next((text for text in block_texts[block_index + 1:] if text), '')
+        context = block_texts[block_index]
+        for image in _walk_markdown_images(token):
+            attrs = image.get('attrs') if isinstance(image.get('attrs'), dict) else {}
+            url = str(attrs.get('url') or '').strip()
+            if not url:
+                continue
+            references.append({
+                'url': url,
+                'alt_text': ''.join(
+                    _markdown_token_text(child) for child in image.get('children') or []
+                ).strip(),
+                'title': str(attrs.get('title') or '').strip(),
+                'heading_path': list(heading_path),
+                'context': context,
+                'context_before': context_before,
+                'context_after': context_after,
+                'source_index': len(references),
+            })
+    return references
+
+
 def parse_document_markdown(  # noqa: C901
     markdown: str,
     document_id: str,
@@ -197,6 +233,32 @@ def _markdown_token_text(token: Dict[str, Any]) -> str:
     if 'raw' in token:
         return str(token.get('raw') or '')
     return ''.join(_markdown_token_text(child) for child in token.get('children') or [])
+
+
+def _markdown_context_text(token: Dict[str, Any]) -> str:
+    token_type = token.get('type')
+    if token_type == 'image':
+        return ''
+    if token_type in {'text', 'codespan'}:
+        return str(token.get('raw') or '')
+    if token_type in {'softbreak', 'linebreak'}:
+        return '\n'
+    if token_type == 'block_code':
+        return ''
+    if token_type == 'inline_html' or token_type == 'block_html':
+        return ''
+    if 'children' in token:
+        return ''.join(_markdown_context_text(child) for child in token.get('children') or [])
+    return str(token.get('raw') or '')
+
+
+def _walk_markdown_images(token: Dict[str, Any]):
+    if token.get('type') == 'image':
+        yield token
+        return
+    for child in token.get('children') or []:
+        if isinstance(child, dict):
+            yield from _walk_markdown_images(child)
 
 
 def _markdown_block_content(token: Dict[str, Any]) -> tuple[str, str]:

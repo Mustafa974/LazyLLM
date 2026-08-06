@@ -100,6 +100,29 @@ def test_update_maps_styles_and_block_type_changes():
     assert 'heading4' in replace.params['replacement_block']
 
 
+def test_image_descriptors_preserve_feishu_media_identity():
+    descriptors = FeishuWriterAdapter.image_descriptors([{
+        'block_id': 'image-1',
+        'block_type': 27,
+        'parent_id': 'doc-1',
+        'image': {
+            'token': 'boxcn-image-1',
+            'width': 1280,
+            'height': 720,
+            'caption': {'content': '系统架构图'},
+        },
+    }])
+
+    assert descriptors == [{
+        'block_id': 'image-1',
+        'parent_block_id': 'doc-1',
+        'file_token': 'boxcn-image-1',
+        'caption': '系统架构图',
+        'declared_width': 1280,
+        'declared_height': 720,
+    }]
+
+
 def test_move_uses_parent_and_final_index():
     adapter = FeishuWriterAdapter()
     document = adapter.blocks_to_ir(_move_blocks(), external_document_id='doc-1')

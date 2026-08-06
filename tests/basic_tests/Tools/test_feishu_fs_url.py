@@ -86,6 +86,55 @@ class TestSpaceIdDynamic(unittest.TestCase):
             self.assertIs(type(instance), FeishuFS)
 
 
+class TestDownloadDocxMedia(unittest.TestCase):
+
+    @staticmethod
+    def _make_fs(response):
+        fs = object.__new__(FeishuFS)
+        fs._base_url = 'https://open.feishu.cn/open-apis'
+        fs._request = MagicMock(return_value=response)
+        return fs
+
+    @staticmethod
+    def _response(chunks, **headers):
+        response = MagicMock()
+        response.headers = headers
+        response.iter_content.return_value = chunks
+        return response
+
+    def test_downloads_binary_media_and_preserves_metadata(self):
+        response = self._response(
+            [b'first-', b'second'],
+            **{
+                'Content-Type': 'image/png; charset=binary',
+                'Content-Disposition': "attachment; filename*=UTF-8''%E6%9E%B6%E6%9E%84%E5%9B%BE.png",
+                'Content-Length': '12',
+            },
+        )
+        fs = self._make_fs(response)
+
+        result = fs._download_docx_media('boxcn-token')
+
+        self.assertEqual(result['content'], b'first-second')
+        self.assertEqual(result['mime_type'], 'image/png')
+        self.assertEqual(result['file_name'], '架构图.png')
+        fs._request.assert_called_once_with(
+            'GET',
+            'https://open.feishu.cn/open-apis/drive/v1/medias/boxcn-token/download',
+            stream=True,
+        )
+        response.close.assert_called_once()
+
+    def test_rejects_media_larger_than_limit(self):
+        response = self._response([b'12345'], **{'Content-Length': '5'})
+        fs = self._make_fs(response)
+
+        with self.assertRaisesRegex(ValueError, 'download limit'):
+            fs._download_docx_media('boxcn-token', max_bytes=4)
+
+        response.close.assert_called_once()
+
+
 class TestMoveBlock(unittest.TestCase):
 
     @classmethod

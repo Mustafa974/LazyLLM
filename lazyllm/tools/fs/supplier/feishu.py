@@ -4,7 +4,7 @@ import json
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse
 
 import requests
 
@@ -49,6 +49,7 @@ _DEFAULT_OAUTH_SCOPE = (
     'drive:drive drive:drive:readonly drive:drive.metadata:readonly '
     'wiki:wiki wiki:wiki:readonly wiki:node:retrieve docx:document'
 )
+_MAX_DOCX_MEDIA_BYTES = 20 * 1024 * 1024
 
 
 def _parse_feishu_browser_url(url: str) -> Optional[Dict[str, str]]:
@@ -639,6 +640,52 @@ class FeishuFSBase(LinkDocumentFSBase):
         if not token:
             raise RuntimeError(f'Feishu media upload returned no file token for {image_block_id!r}.')
         return token
+
+    def _download_docx_media(
+        self,
+        file_token: str,
+        max_bytes: int = _MAX_DOCX_MEDIA_BYTES,
+    ) -> Dict[str, Any]:
+        token = str(file_token or '').strip()
+        if not token:
+            raise ValueError('Feishu media file token is required.')
+        if max_bytes <= 0:
+            raise ValueError('max_bytes must be positive.')
+        encoded_token = quote(token, safe='')
+        response = self._request(
+            'GET',
+            f'{self._base_url}/drive/v1/medias/{encoded_token}/download',
+            stream=True,
+        )
+        try:
+            content_length = response.headers.get('Content-Length')
+            if content_length and int(content_length) > max_bytes:
+                raise ValueError(f'Feishu media exceeds the {max_bytes}-byte download limit.')
+            chunks: List[bytes] = []
+            size = 0
+            for chunk in response.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                size += len(chunk)
+                if size > max_bytes:
+                    raise ValueError(f'Feishu media exceeds the {max_bytes}-byte download limit.')
+                chunks.append(chunk)
+            disposition = str(response.headers.get('Content-Disposition') or '')
+            filename_match = re.search(
+                r"filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)", disposition, re.IGNORECASE,
+            )
+            file_name = ''
+            if filename_match:
+                file_name = (filename_match.group(1) or filename_match.group(2) or '').strip()
+                file_name = unquote(file_name)
+                file_name = file_name.replace('\\', '/').rsplit('/', 1)[-1]
+            return {
+                'content': b''.join(chunks),
+                'mime_type': str(response.headers.get('Content-Type') or '').split(';', 1)[0].strip().lower(),
+                'file_name': file_name,
+            }
+        finally:
+            response.close()
 
     def _bind_docx_images(
         self,

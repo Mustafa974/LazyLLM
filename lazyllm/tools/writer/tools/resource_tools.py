@@ -1,4 +1,6 @@
 from __future__ import annotations
+import hashlib
+import mimetypes
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,6 +20,7 @@ from ..prompts.profile_resources import RESOURCE_PROFILE_PROMPT
 from ..utils import parse_document_markdown
 
 _WRITER_STAGE_ADAPTER = TypeAdapter(WriterStage)
+_IMAGE_MEDIA_SUFFIXES = {'.bmp', '.gif', '.jpe', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp'}
 
 
 class WriterResourceTools(WriterToolBase):
@@ -129,7 +132,12 @@ class WriterResourceTools(WriterToolBase):
             counts={'resource_profiles': len(profiles)},
         ).model_dump()
 
-    def document_to_docir(self, target_document: Any, context: Any = None) -> dict:
+    def document_to_docir(
+        self,
+        target_document: Any,
+        context: Any = None,
+        media_store: str = '',
+    ) -> dict:
         '''Convert a target document into a WriterDocument artifact.'''
         target = self._unified_model(target_document, TargetDocument)
         protocol, real_path, fs, adapter, locator, external_document_id = \
@@ -156,18 +164,153 @@ class WriterResourceTools(WriterToolBase):
             'source': target.model_dump(),
         })
 
+        artifacts: Dict[str, Any] = {'document': document}
+        warnings: List[str] = []
+        media_resources: List[InputResource] = []
+        if media_store:
+            media_resources, warnings = self._extract_document_media(
+                fs=fs,
+                adapter=adapter,
+                raw_blocks=raw_blocks,
+                document=document,
+                locator=locator,
+                external_document_id=external_document_id,
+                media_store=media_store,
+            )
+            artifacts['media_input_resources'] = media_resources
+
         return self._save_artifacts(
-            {'document': document},
+            artifacts,
             step_name='document_to_docir',
             primary_key='document',
             summary='Loaded target document into WriterDocument.',
-            counts={'blocks': len(raw_blocks)},
+            counts={'blocks': len(raw_blocks), 'media_input_resources': len(media_resources)},
+            warnings=warnings,
             extra={
                 'adapter': protocol,
                 'document_id': document.document_id,
                 'stage': document.stage,
             },
         ).model_dump()
+
+    def _extract_document_media(
+        self,
+        *,
+        fs: Any,
+        adapter: WriterAdapterBase,
+        raw_blocks: List[Dict[str, Any]],
+        document: WriterDocument,
+        locator: str,
+        external_document_id: str,
+        media_store: str,
+    ) -> Tuple[List[InputResource], List[str]]:
+        download_media = getattr(fs, '_download_docx_media', None)
+        describe_images = getattr(adapter, 'image_descriptors', None)
+        if not callable(download_media) or not callable(describe_images):
+            return [], []
+        destination_root = Path(media_store).expanduser().resolve()
+        destination_root.mkdir(parents=True, exist_ok=True)
+        contexts = self._document_image_contexts(document)
+        resources: List[InputResource] = []
+        warnings: List[str] = []
+        for descriptor in describe_images(raw_blocks):
+            block_id = str(descriptor.get('block_id') or '').strip()
+            file_token = str(descriptor.get('file_token') or '').strip()
+            label = block_id or file_token or 'unknown image block'
+            if not block_id or not file_token:
+                warnings.append(f'Skipped Feishu image {label!r}: block ID or file token is missing.')
+                continue
+            try:
+                downloaded = download_media(file_token)
+                content = downloaded.get('content') if isinstance(downloaded, dict) else None
+                if not isinstance(content, bytes) or not content:
+                    raise ValueError('download returned no image bytes')
+                mime_type = str(downloaded.get('mime_type') or '').strip().lower()
+                if mime_type and not (
+                    mime_type.startswith('image/') or mime_type == 'application/octet-stream'
+                ):
+                    raise ValueError(f'download returned non-image MIME type {mime_type!r}')
+                digest = hashlib.sha256(content).hexdigest()
+                suffix = self._downloaded_media_suffix(
+                    str(downloaded.get('file_name') or ''), mime_type,
+                )
+                destination = destination_root / f'{digest}{suffix}'
+                if not destination.exists():
+                    destination.write_bytes(content)
+                caption = str(descriptor.get('caption') or '').strip()
+                context = contexts.get(block_id, {})
+                origin = {
+                    'provider': 'feishu',
+                    'source_kind': 'feishu_docx_image',
+                    'source_uri': locator,
+                    'document_id': external_document_id,
+                    'block_id': block_id,
+                    'parent_block_id': str(descriptor.get('parent_block_id') or ''),
+                    'file_token': file_token,
+                    'caption': caption,
+                    'heading_path': context.get('heading_path') or [],
+                    'context_before': context.get('context_before') or '',
+                    'context_after': context.get('context_after') or '',
+                    'declared_width': descriptor.get('declared_width'),
+                    'declared_height': descriptor.get('declared_height'),
+                }
+                resources.append(InputResource(
+                    resource_id=f'feishu-image:{external_document_id}:{block_id}',
+                    resource_type='image',
+                    uri=str(destination),
+                    mime_type=mime_type or None,
+                    title=caption or str(downloaded.get('file_name') or '') or f'Feishu image {block_id}',
+                    summary=caption or None,
+                    meta={
+                        'source_type': 'input_resource',
+                        'caption': caption,
+                        'summary_source': 'caption' if caption else 'filename',
+                        'semantic_status': 'unknown',
+                        'sha256': digest,
+                        'origins': [origin],
+                    },
+                ))
+            except Exception as exc:
+                warnings.append(
+                    f'Failed to extract Feishu image {label!r}: {type(exc).__name__}: {exc}')
+        return resources, warnings
+
+    @staticmethod
+    def _downloaded_media_suffix(file_name: str, mime_type: str) -> str:
+        suffix = Path(file_name).suffix.lower()
+        if suffix in _IMAGE_MEDIA_SUFFIXES:
+            return '.jpg' if suffix == '.jpe' else suffix
+        guessed = mimetypes.guess_extension(mime_type) if mime_type else None
+        return '.jpg' if guessed == '.jpe' else (guessed or '.img')
+
+    @staticmethod
+    def _document_image_contexts(document: WriterDocument) -> Dict[str, Dict[str, Any]]:
+        blocks = list(document.iter_blocks())
+        heading_path: List[str] = []
+        paths: Dict[str, List[str]] = {}
+        for block in blocks:
+            if block.type == 'heading':
+                level = block.numbering.get('level')
+                level = level if isinstance(level, int) and level > 0 else 1
+                heading_path = heading_path[:level - 1]
+                heading_path.append(block.content)
+            paths[block.node_id] = list(heading_path)
+
+        contexts: Dict[str, Dict[str, Any]] = {}
+        for index, block in enumerate(blocks):
+            if block.type != 'image':
+                continue
+            provider_block_id = str(block.provider_binding.get('block_id') or '')
+            if not provider_block_id:
+                continue
+            before = next((item.content for item in reversed(blocks[:index]) if item.content), '')
+            after = next((item.content for item in blocks[index + 1:] if item.content), '')
+            contexts[provider_block_id] = {
+                'heading_path': paths.get(block.node_id, []),
+                'context_before': before,
+                'context_after': after,
+            }
+        return contexts
 
     def create_document(
         self,

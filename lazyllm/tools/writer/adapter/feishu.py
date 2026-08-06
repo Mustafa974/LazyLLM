@@ -193,6 +193,24 @@ class FeishuWriterAdapter(WriterAdapterBase):
             output.append(raw)
         return output
 
+    @staticmethod
+    def image_descriptors(blocks: List[NativeBlock]) -> List[Dict[str, Any]]:
+        descriptors: List[Dict[str, Any]] = []
+        for raw in blocks:
+            if not isinstance(raw, dict) or raw.get('block_type') != 27:
+                continue
+            image = raw.get('image') if isinstance(raw.get('image'), dict) else {}
+            caption = image.get('caption') if isinstance(image.get('caption'), dict) else {}
+            descriptors.append({
+                'block_id': str(raw.get('block_id') or '').strip(),
+                'parent_block_id': str(raw.get('parent_id') or '').strip(),
+                'file_token': str(image.get('token') or '').strip(),
+                'caption': str(caption.get('content') or '').strip(),
+                'declared_width': image.get('width'),
+                'declared_height': image.get('height'),
+            })
+        return descriptors
+
     def patch_to_operation(
         self,
         patch: PatchHunk,
