@@ -56,8 +56,7 @@ Plan semantics:
   - visual_instruction.preferred_strategy must be null or "image_generation"
     for a revision image create.
   - A delete instruction targeting an existing image must not include visual_instruction.
-  - Existing image blocks must not be updated or moved. Text blocks continue to support
-    create, update, delete, and move.
+{image_guidance}
 - A contiguous insertion uses one create instruction so its blocks share one destination
   and retain their final document order.
 - content_ref identifies the located content involved in the operation.
@@ -104,12 +103,23 @@ Output semantics:
   counts/order. In particular, distinct paragraphs are separated by a blank line; do not
   collapse them into sentences in one paragraph even if replacement meta describes them.
 - Replacements are returned in application order and preserve unaffected Markdown exactly.
+- Image handling:
+  - When an instruction creates an image, put exactly `![<caption>](media-placeholder://<need_id>)`
+    in new_string at the insertion position. Use only the need_id values listed in resolved_media.
+  - When an instruction deletes or moves an image, old_string must be the complete image line
+    (a line beginning with `![` and ending with `)`, including its full media-asset URL). Identify
+    the intended image line by caption or document order when the request references
+    \"first\"/\"second\"/a caption.
+  - Never invent need_id values, asset IDs, paths, or URLs.
 
 Markdown document:
 {document_content}
 
 Modify plan:
 {modify_plan_json}
+
+Resolved section media:
+{resolved_media_json}
 
 Writing context:
 {context_json}
