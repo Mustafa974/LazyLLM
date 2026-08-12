@@ -1,13 +1,19 @@
 from __future__ import annotations
+from typing import Any, Dict, List, Literal
 
-from typing import Any, Dict, List, Literal, Optional
-
+from .base import WriterToolBase
+from .stream_tools import (
+    DraftMarkdownStream,
+    DraftPreviewStream,
+    OutlineIRStream,
+    resolve_stream_idle_timeout,
+)
 from ..data_models.context import WritingContext
-from ..data_models.multimodal import _VISUAL_STRATEGY_ORDER, VisualPlan
-from ..data_models.planning import SectionInstruction, SectionInstructionList
+from ..data_models.multimodal import VisualPlan, _VISUAL_STRATEGY_ORDER
 from ..data_models.resource import ResourceProfile
 from ..data_models.task import WritingTask
 from ..data_models.writer_ir import ContentRef, WriterBlock, WriterDocument
+from ..data_models.planning import SectionInstruction, SectionInstructionList
 from ..prompts import (
     GENERATE_OUTLINE_MARKDOWN_PROMPT,
     GENERATE_OUTLINE_PROMPT,
@@ -23,13 +29,6 @@ from ..utils import (
     render_block_markdown,
     render_document_markdown,
     to_prompt_json,
-)
-from .base import WriterToolBase
-from .stream_tools import (
-    DraftMarkdownStream,
-    DraftPreviewStream,
-    OutlineIRStream,
-    resolve_stream_idle_timeout,
 )
 
 
@@ -56,168 +55,47 @@ class WriterPlanningTools(WriterToolBase):
         resolved_representation = self._resolve_representation(writing_task, representation)
 
         if resolved_representation == 'markdown':
-            outline = self._call_llm_text(
-                self._markdown_outline_prompt(
-                    writing_task, writing_context, profiles, execution_data,
-                )
+            prompt = GENERATE_OUTLINE_MARKDOWN_PROMPT.format(
+                task_json=to_prompt_json(writing_task),
+                context_json=to_prompt_json(writing_context),
+                resource_profiles_json=to_prompt_json(profiles),
+                execution_results_json=to_prompt_json(execution_data),
             )
-            return self._save_markdown_outline(
-                outline, writing_task, writing_context, profiles, execution_data,
-            )
+            outline = self._call_llm_text(prompt).strip() + '\n'
+            _, targets = get_markdown_outline_targets(outline)
+            path = self._write_markdown_artifact('outline.md', outline)
+            return make_markdown_tool_result(
+                path=path,
+                step_name='generate_outline',
+                artifact_key='outline',
+                summary='Generated writing outline as Markdown.',
+                counts={
+                    'top_level_sections': len(targets),
+                    'outline_nodes': len(parse_markdown_sections(outline)),
+                    'characters': len(outline),
+                },
+                extra={
+                    'representation': 'markdown',
+                    'task_id': writing_task.task_id,
+                    'context_id': writing_context.context_id,
+                    'resource_profile_count': len(profiles),
+                    'has_execution_results': execution_data is not None,
+                },
+            ).model_dump()
 
         document_id = f'{writing_context.context_id}-outline'
-        outline = self._call_llm_structured(
-            self._ir_outline_prompt(
-                writing_task, writing_context, profiles, execution_data, document_id,
-            ),
-            WriterDocument,
-        )
-        outline = self._normalize_streamed_outline(
-            outline, document_id, writing_task, writing_context, profiles,
-        )
-        return self._save_ir_outline(
-            outline, writing_task, writing_context, profiles, execution_data,
-        )
-
-    def stream_outline(
-        self,
-        task: Any,
-        context: Any,
-        resource_profiles: Any = None,
-        execution_results: Any = None,
-        representation: Literal['ir', 'markdown'] | None = None,
-        *,
-        idle_timeout: Optional[float] = None,
-    ) -> DraftPreviewStream:
-        writing_task = self._unified_model(task, WritingTask)
-        writing_context = self._unified_model(context, WritingContext)
-        profiles = self._unified_models(resource_profiles, ResourceProfile)
-        execution_data = self._unified_raw_data(execution_results)
-        resolved_representation = self._resolve_representation(writing_task, representation)
-        timeout = resolve_stream_idle_timeout(self.llm, idle_timeout)
-
-        if resolved_representation == 'markdown':
-            prompt = self._markdown_outline_prompt(
-                writing_task, writing_context, profiles, execution_data,
-            )
-            return DraftMarkdownStream(
-                call=lambda sink: self._call_llm_text(
-                    prompt,
-                    stream_output={'_stream_sink': sink},
-                ),
-                finalize=lambda outline: self._save_markdown_outline(
-                    outline, writing_task, writing_context, profiles, execution_data,
-                ),
-                prefix='',
-                idle_timeout=timeout,
-                label='Outline Markdown',
-            )
-
-        document_id = f'{writing_context.context_id}-outline'
-        prompt = self._ir_outline_prompt(
-            writing_task, writing_context, profiles, execution_data, document_id,
-        )
-        preview_title = (
-            writing_task.target_document.title
-            if writing_task.target_document and writing_task.target_document.title
-            else None
-        )
-        return OutlineIRStream(
-            call=lambda sink: self._call_llm_structured(
-                prompt,
-                WriterDocument,
-                stream_output={'_stream_sink': sink},
-            ),
-            normalize=lambda outline: self._normalize_streamed_outline(
-                outline, document_id, writing_task, writing_context, profiles,
-            ),
-            finalize=lambda outline: self._save_ir_outline(
-                outline, writing_task, writing_context, profiles, execution_data,
-            ),
-            idle_timeout=timeout,
-            preview_title=preview_title,
-        )
-
-    @staticmethod
-    def _markdown_outline_prompt(
-        task: WritingTask,
-        context: WritingContext,
-        profiles: List[ResourceProfile],
-        execution_data: Any,
-    ) -> str:
-        return GENERATE_OUTLINE_MARKDOWN_PROMPT.format(
-            task_json=to_prompt_json(task),
-            context_json=to_prompt_json(context),
-            resource_profiles_json=to_prompt_json(profiles),
-            execution_results_json=to_prompt_json(execution_data),
-        )
-
-    @staticmethod
-    def _ir_outline_prompt(
-        task: WritingTask,
-        context: WritingContext,
-        profiles: List[ResourceProfile],
-        execution_data: Any,
-        document_id: str,
-    ) -> str:
-        return GENERATE_OUTLINE_PROMPT.format(
-            task_json=to_prompt_json(task),
+        prompt = GENERATE_OUTLINE_PROMPT.format(
+            task_json=to_prompt_json(writing_task),
             document_id=document_id,
-            context_json=to_prompt_json(context),
+            context_json=to_prompt_json(writing_context),
             resource_profiles_json=to_prompt_json(profiles),
             execution_results_json=to_prompt_json(execution_data),
         )
-
-    def _save_markdown_outline(
-        self,
-        outline: str,
-        task: WritingTask,
-        context: WritingContext,
-        profiles: List[ResourceProfile],
-        execution_data: Any,
-    ) -> dict:
-        outline = outline.strip() + '\n'
-        _, targets = get_markdown_outline_targets(outline)
-        path = self._write_markdown_artifact('outline.md', outline)
-        return make_markdown_tool_result(
-            path=path,
-            step_name='generate_outline',
-            artifact_key='outline',
-            summary='Generated writing outline as Markdown.',
-            counts={
-                'top_level_sections': len(targets),
-                'outline_nodes': len(parse_markdown_sections(outline)),
-                'characters': len(outline),
-            },
-            extra={
-                'representation': 'markdown',
-                'task_id': task.task_id,
-                'context_id': context.context_id,
-                'resource_profile_count': len(profiles),
-                'has_execution_results': execution_data is not None,
-            },
-        ).model_dump()
-
-    def _normalize_streamed_outline(
-        self,
-        outline: WriterDocument,
-        document_id: str,
-        task: WritingTask,
-        context: WritingContext,
-        profiles: List[ResourceProfile],
-    ) -> WriterDocument:
+        outline = self._call_llm_structured(prompt, WriterDocument)
         outline.document_id = document_id
-        return self._normalize_outline(outline, task, context, profiles)
+        outline = self._normalize_outline(outline, writing_task, writing_context, profiles)
 
-    def _save_ir_outline(
-        self,
-        outline: WriterDocument,
-        task: WritingTask,
-        context: WritingContext,
-        profiles: List[ResourceProfile],
-        execution_data: Any,
-    ) -> dict:
-        return self._save_artifacts(
+        result = self._save_artifacts(
             {'outline': outline},
             step_name='generate_outline',
             primary_key='outline',
@@ -229,12 +107,122 @@ class WriterPlanningTools(WriterToolBase):
             },
             extra={'representation': 'ir'},
             artifact_meta={
-                'task_id': task.task_id,
-                'context_id': context.context_id,
+                'task_id': writing_task.task_id,
+                'context_id': writing_context.context_id,
                 'resource_profile_count': len(profiles),
                 'has_execution_results': execution_data is not None,
             },
-        ).model_dump()
+        )
+        return result.model_dump()
+
+    def stream_outline(
+        self,
+        task: Any,
+        context: Any,
+        resource_profiles: Any = None,
+        execution_results: Any = None,
+        representation: Literal['ir', 'markdown'] | None = None,
+        *,
+        idle_timeout: float | None = None,
+    ) -> DraftPreviewStream:
+        writing_task = self._unified_model(task, WritingTask)
+        writing_context = self._unified_model(context, WritingContext)
+        profiles = self._unified_models(resource_profiles, ResourceProfile)
+        execution_data = self._unified_raw_data(execution_results)
+        resolved_representation = self._resolve_representation(writing_task, representation)
+        timeout = resolve_stream_idle_timeout(self.llm, idle_timeout)
+
+        if resolved_representation == 'markdown':
+            prompt = GENERATE_OUTLINE_MARKDOWN_PROMPT.format(
+                task_json=to_prompt_json(writing_task),
+                context_json=to_prompt_json(writing_context),
+                resource_profiles_json=to_prompt_json(profiles),
+                execution_results_json=to_prompt_json(execution_data),
+            )
+
+            def finalize_markdown(outline: str) -> dict:
+                outline = outline.strip() + '\n'
+                _, targets = get_markdown_outline_targets(outline)
+                path = self._write_markdown_artifact('outline.md', outline)
+                return make_markdown_tool_result(
+                    path=path,
+                    step_name='generate_outline',
+                    artifact_key='outline',
+                    summary='Generated writing outline as Markdown.',
+                    counts={
+                        'top_level_sections': len(targets),
+                        'outline_nodes': len(parse_markdown_sections(outline)),
+                        'characters': len(outline),
+                    },
+                    extra={
+                        'representation': 'markdown',
+                        'task_id': writing_task.task_id,
+                        'context_id': writing_context.context_id,
+                        'resource_profile_count': len(profiles),
+                        'has_execution_results': execution_data is not None,
+                    },
+                ).model_dump()
+
+            return DraftMarkdownStream(
+                call=lambda sink: self._call_llm_text(
+                    prompt,
+                    stream_output={'_stream_sink': sink},
+                ),
+                finalize=finalize_markdown,
+                prefix='',
+                idle_timeout=timeout,
+                label='Outline Markdown',
+            )
+
+        document_id = f'{writing_context.context_id}-outline'
+        prompt = GENERATE_OUTLINE_PROMPT.format(
+            task_json=to_prompt_json(writing_task),
+            document_id=document_id,
+            context_json=to_prompt_json(writing_context),
+            resource_profiles_json=to_prompt_json(profiles),
+            execution_results_json=to_prompt_json(execution_data),
+        )
+        preview_title = (
+            writing_task.target_document.title
+            if writing_task.target_document and writing_task.target_document.title
+            else None
+        )
+
+        def normalize_ir(outline: WriterDocument) -> WriterDocument:
+            outline.document_id = document_id
+            return self._normalize_outline(outline, writing_task, writing_context, profiles)
+
+        def finalize_ir(outline: WriterDocument) -> dict:
+            return self._save_artifacts(
+                {'outline': outline},
+                step_name='generate_outline',
+                primary_key='outline',
+                context_key=None,
+                summary='Generated writing outline.',
+                counts={
+                    'top_level_sections': len(outline.blocks),
+                    'outline_nodes': len(list(outline.iter_blocks())),
+                },
+                extra={'representation': 'ir'},
+                artifact_meta={
+                    'task_id': writing_task.task_id,
+                    'context_id': writing_context.context_id,
+                    'resource_profile_count': len(profiles),
+                    'has_execution_results': execution_data is not None,
+                },
+            ).model_dump()
+
+        return OutlineIRStream(
+            call=lambda sink: self._call_llm_structured(
+                prompt,
+                WriterDocument,
+                stream_output={'_stream_sink': sink},
+            ),
+            normalize=normalize_ir,
+            finalize=finalize_ir,
+            idle_timeout=timeout,
+            preview_title=preview_title,
+        )
 
     def generate_rewrite_outline(
         self,

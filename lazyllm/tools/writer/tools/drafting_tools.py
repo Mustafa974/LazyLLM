@@ -3,15 +3,14 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
+from .base import WriterToolBase
+from .stream_tools import DraftIRStream, DraftMarkdownStream
 from ..data_models.context import WritingContext
 from ..data_models.multimodal import MediaAssetLibrary, VisualPlan
-from ..data_models.planning import SectionInstruction
 from ..data_models.task import WritingTask
 from ..data_models.writer_ir import WriterBlock, WriterDocument
-from ..prompts import (
-    GENERATE_DRAFT_SECTION_MARKDOWN_PROMPT,
-    GENERATE_DRAFT_SECTION_PROMPT,
-)
+from ..data_models.planning import SectionInstruction
+from ..prompts import GENERATE_DRAFT_SECTION_MARKDOWN_PROMPT, GENERATE_DRAFT_SECTION_PROMPT
 from ..utils import (
     get_markdown_outline_targets,
     make_markdown_tool_result,
@@ -19,13 +18,6 @@ from ..utils import (
     render_document_markdown,
     to_prompt_json,
 )
-from .base import WriterToolBase
-from .stream_tools import (
-    DraftIRStream,
-    DraftMarkdownStream,
-    resolve_stream_idle_timeout,
-)
-
 
 class WriterDraftingTools(WriterToolBase):
     __public_apis__ = [
@@ -88,7 +80,7 @@ class WriterDraftingTools(WriterToolBase):
             writing_task, instruction, writing_context, previous_blocks,
         )
         heading = self._markdown_draft_heading(instruction)
-        timeout = resolve_stream_idle_timeout(self.llm, idle_timeout)
+        timeout = self._draft_stream_idle_timeout(idle_timeout)
         return DraftMarkdownStream(
             call=lambda sink: self._call_llm_text(
                 prompt,
@@ -138,7 +130,7 @@ class WriterDraftingTools(WriterToolBase):
             normalize=lambda block: self._normalize_draft_block(block, instruction),
             finalize=lambda block: self._save_ir_draft_section(block, result_extra, media_assets),
             instruction=instruction,
-            idle_timeout=resolve_stream_idle_timeout(self.llm, idle_timeout),
+            idle_timeout=self._draft_stream_idle_timeout(idle_timeout),
         )
 
     def _generate_ir_draft_section(
@@ -280,6 +272,18 @@ class WriterDraftingTools(WriterToolBase):
         if heading_level != 2:
             raise ValueError('Markdown draft sections must target an H2 outline section.')
         return f'## {instruction.section_title.strip()}'
+
+    def _draft_stream_idle_timeout(self, idle_timeout: Optional[float]) -> float:
+        value: Any = idle_timeout
+        if value is None:
+            value = getattr(self.llm, '_timeout', None)
+        if isinstance(value, (tuple, list)):
+            value = value[-1] if value else None
+        if value is None:
+            value = 180.0
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError('idle_timeout must be a positive number.')
+        return float(value)
 
     @staticmethod
     def _draft_result_extra(
