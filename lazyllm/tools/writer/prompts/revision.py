@@ -106,6 +106,8 @@ Output semantics:
 - Image handling:
   - When an instruction creates an image, put exactly `![<caption>](media-placeholder://<need_id>)`
     in new_string at the insertion position. Use only the need_id values listed in resolved_media.
+    Never use Obsidian/wiki syntax such as `![[...]]`, a local filename/path, a raw URL,
+    or any other image syntax.
   - When an instruction deletes or moves an image, old_string must be the complete image line
     (a line beginning with `![` and ending with `)`, including its full media-asset URL). Identify
     the intended image line by caption or document order when the request references

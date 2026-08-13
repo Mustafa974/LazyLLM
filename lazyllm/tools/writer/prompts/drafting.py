@@ -76,6 +76,8 @@ Requirements:
 - section_media lists this section's visual needs and their resolved assets. When a
   required visual need is listed, place its image at the most appropriate reading
   position using exactly: ![short caption](media-placeholder://<need_id>).
+  This is the only permitted image syntax: never use Obsidian/wiki syntax such as
+  ![[...]], a local filename/path, a raw URL, or extra brackets.
   Use only the need_id values listed in section_media; never invent or modify an id.
   If a need is listed but has no resolved assets, do not output an image for it.
 - Do not output image markup for anything outside this section's section_media list.
