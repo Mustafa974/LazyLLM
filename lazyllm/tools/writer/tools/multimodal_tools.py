@@ -294,6 +294,11 @@ class WriterMultimodalTools(WriterToolBase):
                 'semantic_status': resource.meta.get('semantic_status') or (
                     'ready' if summary_source == 'resource_summary' else 'unknown'
                 ),
+                **(
+                    {'source_url': resource.meta['source_url']}
+                    if source_type == 'web_search' and resource.meta.get('source_url')
+                    else {}
+                ),
             },
         )
 
