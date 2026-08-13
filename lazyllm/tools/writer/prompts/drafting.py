@@ -73,6 +73,12 @@ Requirements:
 - Use ordinary Markdown paragraphs, lists, quotes, fenced code, tables, images, and
   subheadings only when they help the requested content.
 - Return substantial finished prose, not a summary, placeholder, or planning notes.
+- section_media lists this section's visual needs and their resolved assets. When a
+  required visual need is listed, place its image at the most appropriate reading
+  position using exactly: ![short caption](media-placeholder://<need_id>).
+  Use only the need_id values listed in section_media; never invent or modify an id.
+  If a need is listed but has no resolved assets, do not output an image for it.
+- Do not output image markup for anything outside this section's section_media list.
 
 Writing task:
 {task_json}
@@ -85,6 +91,9 @@ Previously drafted Markdown (context only; do not review, summarize, or continue
 
 Current section instruction:
 {section_instruction_json}
+
+Resolved section media:
+{section_media_json}
 
 Write only the body of the current section now. Begin directly with its finished
 prose and follow the current section instruction, even when the previous Markdown

@@ -50,6 +50,8 @@ class WriterDraftingTools(WriterToolBase):
                 instruction,
                 writing_context,
                 previous_blocks,
+                visual_plan,
+                media_assets,
                 result_extra,
             )
 
@@ -69,6 +71,8 @@ class WriterDraftingTools(WriterToolBase):
         section_instruction: Any,
         context: Any,
         previous_blocks: Any = None,
+        visual_plan: Any = None,
+        media_assets: Any = None,
         *,
         idle_timeout: Optional[float] = None,
     ) -> DraftMarkdownStream:
@@ -83,6 +87,7 @@ class WriterDraftingTools(WriterToolBase):
         )
         prompt = self._markdown_draft_prompt(
             writing_task, instruction, writing_context, previous_blocks,
+            visual_plan, media_assets,
         )
         heading = self._markdown_draft_heading(instruction)
         timeout = self._draft_stream_idle_timeout(idle_timeout)
@@ -224,9 +229,13 @@ class WriterDraftingTools(WriterToolBase):
         instruction: SectionInstruction,
         context: WritingContext,
         previous_blocks: Any,
+        visual_plan: Any,
+        media_assets: Any,
         result_extra: Dict[str, Any],
     ) -> dict:
-        prompt = self._markdown_draft_prompt(task, instruction, context, previous_blocks)
+        prompt = self._markdown_draft_prompt(
+            task, instruction, context, previous_blocks, visual_plan, media_assets,
+        )
         body = self._call_llm_text(prompt)
         body = self._condense_markdown_section_if_needed(body, instruction)
         return self._finalize_markdown_draft_section(body, instruction, result_extra)
@@ -287,13 +296,21 @@ class WriterDraftingTools(WriterToolBase):
         instruction: SectionInstruction,
         context: WritingContext,
         previous_blocks: Any,
+        visual_plan: Any = None,
+        media_assets: Any = None,
     ) -> str:
         previous_markdown = self._unified_previous_markdown(previous_blocks)
+        resolved_visual_plan = self._unified_optional_model(visual_plan, VisualPlan) or VisualPlan()
+        media_library = self._unified_optional_model(media_assets, MediaAssetLibrary)
+        section_media = self._markdown_media_for_section(
+            instruction, resolved_visual_plan, media_library,
+        )
         return GENERATE_DRAFT_SECTION_MARKDOWN_PROMPT.format(
             task_json=to_prompt_json(task),
             section_instruction_json=to_prompt_json(instruction),
             context_json=to_prompt_json(context),
             previous_markdown=previous_markdown or '(none)',
+            section_media_json=to_prompt_json(section_media),
         )
 
     def _finalize_markdown_draft_section(
@@ -645,6 +662,48 @@ class WriterDraftingTools(WriterToolBase):
     ) -> Dict[str, Any]:
         node_id = instruction.content_ref.node_id
         needs = [need for need in visual_plan.instructions if need.content_ref.node_id == node_id]
+        asset_ids = {
+            asset_id
+            for need in needs
+            for asset_id in (library.visual_need_asset_ids.get(need.need_id, []) if library else [])
+        }
+        return {
+            'visual_needs': [
+                {
+                    'need_id': need.need_id,
+                    'visual_type': need.visual_type,
+                    'purpose': need.purpose,
+                    'required': need.required,
+                }
+                for need in needs
+            ],
+            'assets': [
+                {
+                    'media_asset_id': asset.media_asset_id,
+                    'asset_type': asset.asset_type,
+                    'caption': asset.caption,
+                    'summary': asset.summary,
+                }
+                for asset_id, asset in (library.assets.items() if library else [])
+                if asset_id in asset_ids
+            ],
+            'visual_need_asset_ids': {
+                need.need_id: library.visual_need_asset_ids.get(need.need_id, []) if library else []
+                for need in needs
+            },
+        }
+
+    @staticmethod
+    def _markdown_media_for_section(
+        instruction: SectionInstruction,
+        visual_plan: VisualPlan,
+        library: Optional[MediaAssetLibrary],
+    ) -> Dict[str, Any]:
+        key = (tuple(instruction.content_ref.heading_path), instruction.content_ref.occurrence)
+        needs = [
+            need for need in visual_plan.instructions
+            if (tuple(need.content_ref.heading_path), need.content_ref.occurrence) == key
+        ]
         asset_ids = {
             asset_id
             for need in needs
