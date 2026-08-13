@@ -1166,18 +1166,22 @@ def test_markdown_draft_receives_only_its_resolved_media():
     assert markdown.endswith('![关键关系](media-placeholder://IMAGE-1)\n')
 
 
-def test_visual_strategy_order_keeps_generation_fallback_for_chart_and_table():
+def test_visual_strategy_order_matches_all_visual_types():
     tool = WriterMultimodalTools()
-    for visual_type in ('chart', 'table'):
+    expected_strategies = {
+        'image': ['web_search', 'image_generation'],
+        'diagram': ['code_render', 'web_search', 'image_generation'],
+        'chart': ['code_render', 'web_search', 'image_generation'],
+        'table': ['code_render', 'web_search', 'image_generation'],
+    }
+    for visual_type, expected in expected_strategies.items():
         need = VisualInstruction(
             need_id=f'{visual_type}-1',
             content_ref=ContentRef(node_id='section-1'),
             visual_type=visual_type,
             purpose='测试策略顺序',
         )
-        assert tool._visual_strategies(need, None) == [
-            'code_render', 'web_search', 'image_generation',
-        ]
+        assert tool._visual_strategies(need, None) == expected
 
 
 def test_web_search_media_keeps_its_source_url(tmp_path):

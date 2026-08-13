@@ -9,7 +9,7 @@ from lazyllm.module.module import ModuleExecutionError
 
 from .base import WriterToolBase
 from ..data_models.context import WritingContext
-from ..data_models.multimodal import MediaAssetLibrary
+from ..data_models.multimodal import MediaAssetLibrary, _VISUAL_STRATEGY_ORDER
 from ..data_models.revision import (
     GeneratedRevision,
     LocatedContent,
@@ -693,18 +693,18 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
             return blocks
         if len(blocks) != 1:
             raise ValueError(
-                f'image create instruction {instruction.instruction_id!r} '
+                f'visual create instruction {instruction.instruction_id!r} '
                 'requires exactly one block.'
             )
         asset_id = self._require_visual_asset(visual, media_assets)
         content = blocks[0].model_copy(deep=True)
         if content.type not in {None, 'image'}:
             raise ValueError(
-                f'image create instruction {instruction.instruction_id!r} '
+                f'visual create instruction {instruction.instruction_id!r} '
                 'must produce type="image".'
             )
         if content.children:
-            raise ValueError('image create content must not contain child blocks.')
+            raise ValueError('visual create content must not contain child blocks.')
         content.type = 'image'
         references = {'type': 'media_asset', 'id': asset_id}
         asset = media_assets.assets[asset_id]
@@ -1140,12 +1140,12 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
         if visual is not None:
             if instruction.modify_type != 'create':
                 raise ValueError('visual_instruction is only valid for create instructions.')
-            if visual.visual_type != 'image':
-                raise ValueError('revision visual_instruction.visual_type must be "image".')
+            if visual.visual_type not in _VISUAL_STRATEGY_ORDER:
+                raise ValueError('revision visual_instruction has an unsupported visual_type.')
             if not visual.purpose.strip():
                 raise ValueError('revision visual_instruction.purpose must not be empty.')
             if not visual.required:
-                raise ValueError('revision image additions must be required.')
+                raise ValueError('revision visual additions must be required.')
             if visual.need_id != instruction.instruction_id:
                 raise ValueError(
                     'visual_instruction.need_id must equal instruction_id.'
@@ -1154,9 +1154,10 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
                 raise ValueError(
                     'visual_instruction.content_ref must equal instruction.content_ref.'
                 )
-            if visual.preferred_strategy not in {None, 'image_generation'}:
+            if visual.preferred_strategy is not None \
+                    and visual.preferred_strategy not in _VISUAL_STRATEGY_ORDER[visual.visual_type]:
                 raise ValueError(
-                    'revision image preferred_strategy must be null or image_generation.'
+                    'revision visual preferred_strategy is not supported by visual_type.'
                 )
 
         if document is None or instruction.modify_type not in {'update', 'move'}:

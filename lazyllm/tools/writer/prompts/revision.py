@@ -46,15 +46,17 @@ Plan semantics:
     argument; do not mechanically shrink every located block by the same ratio.
   - Do not delete a semantically distinct block solely to satisfy a length target when
     its essential content cannot be preserved in a retained block.
-- Image-specific revision semantics:
-  - A create instruction that adds an image must include visual_instruction.
+- Visual revision semantics:
+  - A create instruction that adds visual content must include visual_instruction.
   - visual_instruction.need_id must equal instruction_id and its content_ref must
     equal the create instruction's content_ref.
-  - visual_instruction.visual_type must be "image" for this revision workflow.
-  - visual_instruction.purpose is the semantic image requirement used to match an
-    uploaded asset or request image generation. required must be true.
-  - visual_instruction.preferred_strategy must be null or "image_generation"
-    for a revision image create.
+  - visual_instruction.visual_type must be one of "image", "diagram", "chart", or
+    "table". All visual types are inserted as one image block after acquisition.
+  - visual_instruction.purpose is the semantic visual requirement used to match an
+    uploaded asset or acquire a new image. required must be true.
+  - visual_instruction.preferred_strategy must be null or an available strategy for
+    its visual_type: image uses web_search/image_generation; diagram, chart, and table
+    use code_render/web_search/image_generation.
   - A delete instruction targeting an existing image must not include visual_instruction.
 {image_guidance}
 - A contiguous insertion uses one create instruction so its blocks share one destination
@@ -68,7 +70,7 @@ Plan semantics:
   including paragraph count, list-item count, heading level, and ordering. Render distinct
   Markdown paragraphs with blank lines and render lists/headings with their Markdown syntax;
   do not record required structure only in meta.
-- For an image create, describe one image block and its final caption in instruction;
+- For a visual create, describe one image block and its final caption in instruction;
   do not invent media_asset IDs, file paths, URLs, or provider identifiers.
 - instruction_id is unique, and instructions follow execution order.
 - scope and summary describe the plan as a whole.
@@ -103,8 +105,8 @@ Output semantics:
   counts/order. In particular, distinct paragraphs are separated by a blank line; do not
   collapse them into sentences in one paragraph even if replacement meta describes them.
 - Replacements are returned in application order and preserve unaffected Markdown exactly.
-- Image handling:
-  - When an instruction creates an image, put exactly `![<caption>](media-placeholder://<need_id>)`
+- Visual handling:
+  - When an instruction creates visual content, put exactly `![<caption>](media-placeholder://<need_id>)`
     in new_string at the insertion position. Use only the need_id values listed in resolved_media.
     Never use Obsidian/wiki syntax such as `![[...]]`, a local filename/path, a raw URL,
     or any other image syntax.
@@ -160,7 +162,7 @@ Output semantics:
 - new_title represents title_instruction when the plan includes a title revision.
 - Headings use type="heading" with numbering.level; inline formatting uses spans.
 - All authored content is complete, self-contained, and consistent with the writing context.
-- For an image create, return exactly one new block with type="image". Its content is
+- For a visual create, return exactly one new block with type="image". Its content is
   the final caption. Do not invent references or asset IDs; the system adds the single
   resolved media_asset reference after generation.
 
