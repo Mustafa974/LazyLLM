@@ -248,6 +248,9 @@ class WriterDraftingTools(WriterToolBase):
         body = body.strip()
         if not body:
             raise ValueError('Markdown draft section body must not be empty.')
+        body = self._normalize_markdown_draft_body(body)
+        if not body:
+            raise ValueError('Markdown draft section body contains only headings, no content.')
         heading = self._markdown_draft_heading(instruction)
         markdown = f'{heading}\n\n{body}\n'
         self._validate_markdown_draft_section(markdown, instruction)
@@ -539,6 +542,37 @@ class WriterDraftingTools(WriterToolBase):
         if not all(isinstance(section, str) for section in sections):
             raise ValueError('Markdown previous_blocks must contain only Markdown sections.')
         return '\n\n'.join(section.strip() for section in sections if isinstance(section, str))
+
+    @staticmethod
+    def _normalize_markdown_draft_body(body: str) -> str:
+        '''Strip leading H1/H2 and downgrade stray H1/H2 to H3.'''
+        lines = body.split('\n')
+        result: List[str] = []
+        in_fence = False
+        seen_content = False
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped[:3] in ('```', '~~~'):
+                in_fence = not in_fence
+                result.append(line)
+                seen_content = True
+                continue
+            if in_fence:
+                result.append(line)
+                continue
+
+            m = re.match(r'^(#{1,2})\s+(.+?)\s*$', line)
+            if m:
+                if seen_content:
+                    result.append(f'### {m.group(2).strip()}')
+                continue
+
+            if stripped:
+                seen_content = True
+            result.append(line)
+
+        return '\n'.join(result).strip()
 
     @staticmethod
     def _validate_markdown_draft_section(
