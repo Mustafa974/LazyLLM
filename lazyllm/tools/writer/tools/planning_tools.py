@@ -395,6 +395,7 @@ class WriterPlanningTools(WriterToolBase):
         execution_results: Any,
     ) -> SectionInstructionList:
         target_by_id = {block.node_id: block for block in target_blocks}
+        node_id_by_original = self._ir_outline_node_ids_from_outline(outline)
         instruction_by_node_id: Dict[str, SectionInstruction] = {}
 
         for instruction in instruction_list.instructions:
@@ -426,6 +427,8 @@ class WriterPlanningTools(WriterToolBase):
                 block,
                 outline,
                 bool(context.facts),
+                node_id_by_original,
+                node_id_by_original[block.node_id],
             )
             for block in target_blocks
         ]
@@ -436,6 +439,10 @@ class WriterPlanningTools(WriterToolBase):
             'outline_title': outline.title,
             'context_id': context.context_id,
             'has_execution_results': execution_results is not None,
+            'cross_reference_count': sum(
+                len(instruction.meta.get('cross_references') or [])
+                for instruction in instruction_list.instructions
+            ),
         })
         return instruction_list
 
@@ -471,6 +478,7 @@ class WriterPlanningTools(WriterToolBase):
             raise ValueError(f'Missing section instructions for Markdown headings: {missing_refs!r}.')
 
         outline_id = f'{context.context_id}-outline-markdown'
+        node_id_by_ref = self._markdown_outline_node_ids(targets)
         normalized = []
         for level, heading_path, occurrence, _ in targets:
             key = (tuple(heading_path), occurrence)
@@ -485,7 +493,11 @@ class WriterPlanningTools(WriterToolBase):
                 'outline_heading_level': level,
                 'outline_id': outline_id,
                 'outline_title': heading_path[0],
+                'outline_node_id': node_id_by_ref[key],
             })
+            self._normalize_cross_references(
+                instruction, node_id_by_ref[key], node_id_by_ref,
+            )
             normalized.append(instruction)
 
         instruction_list.outline_id = outline_id
@@ -498,8 +510,97 @@ class WriterPlanningTools(WriterToolBase):
             'outline_title': targets[0][1][0],
             'context_id': context.context_id,
             'has_execution_results': execution_results is not None,
+            'cross_reference_count': sum(
+                len(instruction.meta.get('cross_references') or [])
+                for instruction in instruction_list.instructions
+            ),
         })
         return instruction_list
+
+    @staticmethod
+    def _markdown_outline_node_ids(
+        targets: List[tuple[int, List[str], int, str]],
+    ) -> Dict[tuple[tuple[str, ...], int], str]:
+        ids: Dict[tuple[tuple[str, ...], int], str] = {}
+        counters: List[int] = []
+        for level, heading_path, occurrence, _ in targets:
+            depth = level - 1
+            counters = counters[:depth]
+            counters.extend([0] * (depth - len(counters)))
+            counters[-1] += 1
+            node_id = 'sec-' + '-'.join(f'{value:03d}' for value in counters)
+            ids[(tuple(heading_path), occurrence)] = node_id
+        return ids
+
+    @classmethod
+    def _normalize_cross_references(
+        cls,
+        instruction: SectionInstruction,
+        section_id: str,
+        section_ids: Dict[tuple[tuple[str, ...], int], str] | Dict[str, str],
+    ) -> None:
+        raw_references = instruction.meta.get('cross_references')
+        if raw_references is None:
+            instruction.meta['cross_references'] = []
+            return
+        if not isinstance(raw_references, list):
+            raise ValueError(
+                f'Section instruction {instruction.instruction_id!r} '
+                'cross_references must be a list.'
+            )
+
+        local_counts: Dict[str, int] = {}
+        normalized: List[Dict[str, Any]] = []
+        for item in raw_references:
+            if not isinstance(item, dict):
+                raise ValueError('Each cross-reference must be an object.')
+            must_create = bool(item.get('must_create'))
+            kind = str(item.get('kind') or '').strip()
+            if must_create:
+                if kind not in {'image', 'table', 'code'}:
+                    raise ValueError(
+                        f'Created cross-reference kind must be image, table, or code; got {kind!r}.'
+                    )
+                caption = str(item.get('caption') or '').strip()
+                if not caption:
+                    caption = instruction.section_title.strip() or f'{kind}-{section_id}'
+                local_counts[kind] = local_counts.get(kind, 0) + 1
+                target = f'{kind}-{section_id}-{local_counts[kind]:02d}'
+            else:
+                target_ref = item.get('target_ref')
+                target = cls._resolve_cross_reference_target(
+                    target_ref, section_ids,
+                )
+                kind = 'section'
+
+            normalized.append({
+                'target': target,
+                'kind': kind,
+                'required': bool(item.get('required', True)),
+                'must_create': must_create,
+                'caption': str(item.get('caption') or '').strip(),
+                'guidance': str(item.get('guidance') or '').strip(),
+            })
+        instruction.meta['cross_references'] = normalized
+
+    @staticmethod
+    def _resolve_cross_reference_target(
+        target_ref: Any,
+        section_ids: Dict[tuple[tuple[str, ...], int], str] | Dict[str, str],
+    ) -> str:
+        if isinstance(target_ref, dict) and isinstance(section_ids, dict):
+            node_id = target_ref.get('node_id')
+            if isinstance(node_id, str):
+                mapped = section_ids.get(node_id)
+                if mapped is not None:
+                    return mapped
+            heading_path = target_ref.get('heading_path')
+            occurrence = int(target_ref.get('occurrence') or 1)
+            if isinstance(heading_path, list):
+                target = section_ids.get((tuple(heading_path), occurrence))
+                if target is not None:
+                    return target
+        raise ValueError(f'Unknown cross-reference target: {target_ref!r}')
 
     @staticmethod
     def _rewrite_source_sections(
@@ -655,9 +756,12 @@ class WriterPlanningTools(WriterToolBase):
         block: WriterBlock,
         outline: WriterDocument,
         has_available_facts: bool,
+        node_id_by_original: Dict[str, str],
+        outline_node_id: str,
     ) -> SectionInstruction:
         self._validate_instruction(instruction, block.node_id)
         instruction.section_title = block.content
+        instruction.content_ref.node_id = outline_node_id
         instruction.references = [dict(reference) for reference in block.references]
         instruction.visual_needs = []
         if not has_available_facts:
@@ -667,8 +771,35 @@ class WriterPlanningTools(WriterToolBase):
             'outline_node_level': block.numbering.get('level'),
             'outline_id': outline.document_id,
             'outline_title': outline.title,
+            'outline_node_id': outline_node_id,
         })
+        self._normalize_cross_references(
+            instruction, outline_node_id, node_id_by_original,
+        )
         return instruction
+
+    @staticmethod
+    def _ir_outline_node_ids_from_outline(outline: WriterDocument) -> Dict[str, str]:
+        ids: Dict[str, str] = {}
+
+        def walk(blocks: List[WriterBlock], counters: List[int]) -> None:
+            for block in blocks:
+                if block.type == 'heading':
+                    level = int(block.numbering.get('level') or 1)
+                    del counters[level:]
+                    if len(counters) < level:
+                        counters.extend([0] * (level - len(counters)))
+                    counters[level - 1] += 1
+                    node_id = 'sec-' + '-'.join(
+                        f'{value:03d}' for value in counters
+                    )
+                    ids[block.node_id] = node_id
+                    walk(block.children, counters)
+                else:
+                    walk(block.children, counters)
+
+        walk(outline.blocks, [])
+        return ids
 
     @staticmethod
     def _validate_instruction(instruction: SectionInstruction, target: str) -> None:

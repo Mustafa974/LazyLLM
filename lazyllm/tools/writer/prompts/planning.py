@@ -199,6 +199,14 @@ Requirements:
 - expected_blocks should be a concise block-level content plan for the draft tool.
 - For a normal section, expected_blocks should usually contain 3 to 6 planned content blocks unless the section is explicitly very short.
 - expected_blocks are planning labels for coverage and ordering, not visible headings that must appear in final text.
+- When this section should refer to another section, add an object to
+   meta.cross_references with target_ref, required=true, and concise guidance.
+   For Writer IR, target_ref is {{"node_id": "..."}} copied from the outline.
+   For Markdown, target_ref is the target section's {{"heading_path": [...], "occurrence": 1}}.
+- When this section must create and reference an image, table, or code block, add an object to
+   meta.cross_references with must_create=true, kind="image"|"table"|"code", a concrete caption,
+   required=true, and concise guidance. Do not invent the final target ID; the system assigns it.
+- Do not write visible reference numbers such as “第 1 节”, “图 1”, “表 1”, or “代码 1”.
 - Do not invent facts that conflict with writing context.
 
 Outline (authoritative structure):

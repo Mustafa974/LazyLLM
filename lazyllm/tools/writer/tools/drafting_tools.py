@@ -8,8 +8,13 @@ from .stream_tools import DraftIRStream, DraftMarkdownStream
 from ..data_models.context import WritingContext
 from ..data_models.multimodal import MediaAssetLibrary, VisualPlan
 from ..data_models.task import WritingTask
-from ..data_models.writer_ir import WriterBlock, WriterDocument
+from ..data_models.writer_ir import WriterBlock, WriterDocument, WriterSpan
 from ..data_models.planning import SectionInstruction
+from ..numbering import (
+    build_numbering_view_from_ir,
+    build_numbering_view_from_markdown,
+    compute_numbering,
+)
 from ..prompts import GENERATE_DRAFT_SECTION_MARKDOWN_PROMPT, GENERATE_DRAFT_SECTION_PROMPT
 from ..utils import (
     get_markdown_outline_targets,
@@ -25,6 +30,9 @@ class WriterDraftingTools(WriterToolBase):
         'generate_draft_document',
         'generate_final_document',
     ]
+
+    _MARKDOWN_INTERNAL_LINK_RE = re.compile(r'\[([^\]]*)\]\(#((?:block-)?[^)]+)\)')
+    _MARKDOWN_ANCHOR_RE = re.compile(r'<a id="((?:block-)?[^"]+)"></a>')
 
     def generate_draft_section(
         self, task: Any, section_instruction: Any,
@@ -80,6 +88,7 @@ class WriterDraftingTools(WriterToolBase):
             writing_task, instruction, writing_context, previous_blocks,
         )
         heading = self._markdown_draft_heading(instruction)
+        prefix = self._markdown_draft_prefix(instruction, heading)
         timeout = self._draft_stream_idle_timeout(idle_timeout)
         return DraftMarkdownStream(
             call=lambda sink: self._call_llm_text(
@@ -89,7 +98,7 @@ class WriterDraftingTools(WriterToolBase):
             finalize=lambda body: self._finalize_markdown_draft_section(
                 body, instruction, result_extra,
             ),
-            prefix=f'{heading}\n\n',
+            prefix=prefix,
             idle_timeout=timeout,
         )
 
@@ -151,10 +160,8 @@ class WriterDraftingTools(WriterToolBase):
             visual_plan,
             media_assets,
         )
-        block = self._normalize_draft_block(
-            self._call_llm_structured(prompt, WriterBlock),
-            instruction,
-        )
+        block = self._call_llm_structured(prompt, WriterBlock)
+        block = self._normalize_draft_block(block, instruction)
         return self._save_ir_draft_section(block, result_extra)
 
     def _ir_draft_prompt(
@@ -252,7 +259,9 @@ class WriterDraftingTools(WriterToolBase):
         if not body:
             raise ValueError('Markdown draft section body contains only headings, no content.')
         heading = self._markdown_draft_heading(instruction)
-        markdown = f'{heading}\n\n{body}\n'
+        body = self._normalize_markdown_cross_references(body, instruction)
+        prefix = self._markdown_draft_prefix(instruction, heading)
+        markdown = f'{prefix}{body}\n'
         self._validate_markdown_draft_section(markdown, instruction)
 
         filename = self._safe_artifact_component(instruction.instruction_id)
@@ -275,6 +284,13 @@ class WriterDraftingTools(WriterToolBase):
         if heading_level != 2:
             raise ValueError('Markdown draft sections must target an H2 outline section.')
         return f'## {instruction.section_title.strip()}'
+
+    @staticmethod
+    def _markdown_draft_prefix(instruction: SectionInstruction, heading: str) -> str:
+        outline_node_id = instruction.meta.get('outline_node_id')
+        if outline_node_id:
+            return f'<a id="block-{outline_node_id}"></a>\n\n{heading}\n\n'
+        return f'{heading}\n\n'
 
     def _draft_stream_idle_timeout(self, idle_timeout: Optional[float]) -> float:
         value: Any = idle_timeout
@@ -350,6 +366,7 @@ class WriterDraftingTools(WriterToolBase):
                 'outline_title': writing_outline.title if writing_outline else None,
             },
         )
+        compute_numbering(build_numbering_view_from_ir(draft_document))
         draft_block_count = len(list(draft_document.iter_blocks())) - len(draft_document.blocks)
         result = self._save_artifacts(
             {'draft_document': draft_document},
@@ -412,6 +429,8 @@ class WriterDraftingTools(WriterToolBase):
             section.strip() for section in section_markdown
         )
         markdown = markdown.rstrip() + '\n'
+        markdown = self._ensure_markdown_outline_anchors(markdown)
+        compute_numbering(build_numbering_view_from_markdown(markdown))
         assembled_sections = [
             section for section in parse_markdown_sections(markdown)
             if section[0] == 2
@@ -596,8 +615,8 @@ class WriterDraftingTools(WriterToolBase):
             raise ValueError('Markdown draft section body must not be empty.')
         return top_sections[0][1][-1]
 
-    @staticmethod
     def _normalize_draft_block(
+        self,
         draft_block: WriterBlock,
         instruction: SectionInstruction,
     ) -> WriterBlock:
@@ -612,7 +631,219 @@ class WriterDraftingTools(WriterToolBase):
         for block in draft_block.iter_blocks():
             block.stage = 'draft'
         draft_block.references = [dict(reference) for reference in instruction.references]
+        self._normalize_ir_cross_references(draft_block, instruction)
         return draft_block
+
+    @staticmethod
+    def _normalize_ir_cross_references(
+        draft_block: WriterBlock,
+        instruction: SectionInstruction,
+    ) -> None:
+        references = [
+            item for item in instruction.meta.get('cross_references') or []
+            if isinstance(item, dict)
+        ]
+        allowed_targets = {str(item.get('target')) for item in references}
+        block_by_id = {block.node_id: block for block in draft_block.iter_blocks()}
+        unavailable_must_create: set[str] = set()
+        for item in references:
+            if not item.get('must_create'):
+                continue
+            target = str(item.get('target'))
+            expected_type = str(item.get('kind'))
+            target_block = block_by_id.get(target)
+            if target_block is None or target_block.type != expected_type:
+                if expected_type != 'image':
+                    raise ValueError(f'Missing created cross-reference target {target!r}.')
+                unavailable_must_create.add(target)
+                continue
+
+        found_targets: set[str] = set()
+        for block in draft_block.iter_blocks():
+            for span in block.spans:
+                link = span.style.get('link')
+                if not isinstance(link, dict) or link.get('type') != 'internal_ref':
+                    continue
+                target = link.get('target_node_id')
+                if target not in allowed_targets:
+                    continue
+                span.text = ''
+                found_targets.add(str(target))
+            if block.spans:
+                block.content = ''.join(span.text for span in block.spans)
+
+        missing = [
+            str(item.get('target')) for item in references
+            if item.get('required', True)
+            and str(item.get('target')) not in found_targets
+            and str(item.get('target')) not in unavailable_must_create
+        ]
+        if missing:
+            paragraph = next(
+                (
+                    block for block in draft_block.iter_blocks()
+                    if block.type == 'paragraph' and block.content.strip()
+                ),
+                None,
+            )
+            if paragraph is None:
+                paragraph = next(
+                    (
+                        block for block in draft_block.iter_blocks()
+                        if block.content.strip() and block.type != 'heading'
+                    ),
+                    None,
+                )
+            if paragraph is not None:
+                if not paragraph.spans:
+                    paragraph.spans.append(WriterSpan(text=paragraph.content))
+                for target in missing:
+                    paragraph.spans.append(WriterSpan(
+                        text='',
+                        style={
+                            'link': {
+                                'type': 'internal_ref',
+                                'target_node_id': target,
+                            },
+                        },
+                    ))
+                paragraph.content = ''.join(
+                    span.text for span in paragraph.spans
+                )
+                found_targets.update(missing)
+
+        missing = [
+            str(item.get('target')) for item in references
+            if item.get('required', True)
+            and str(item.get('target')) not in found_targets
+            and str(item.get('target')) not in unavailable_must_create
+        ]
+        if missing:
+            raise ValueError(f'Missing required cross-references: {missing!r}.')
+
+    @classmethod
+    def _normalize_markdown_cross_references(
+        cls,
+        body: str,
+        instruction: SectionInstruction,
+    ) -> str:
+        references = [
+            item for item in instruction.meta.get('cross_references') or []
+            if isinstance(item, dict)
+        ]
+        allowed_targets = {str(item.get('target')) for item in references}
+        found_targets: set[str] = set()
+        found_anchors: set[str] = set()
+        output: List[str] = []
+        fence: str | None = None
+        for line in body.splitlines():
+            fence_match = re.match(r'^\s*(```+|~~~+)', line)
+            if fence_match:
+                marker = fence_match.group(1)[0]
+                if fence is None:
+                    fence = marker
+                elif fence == marker:
+                    fence = None
+                output.append(line)
+                continue
+            if fence is not None:
+                output.append(line)
+                continue
+            raw_anchors = cls._MARKDOWN_ANCHOR_RE.findall(line)
+            anchors = []
+            for raw_target in raw_anchors:
+                if raw_target.startswith('block-'):
+                    target = raw_target[len('block-'):]
+                    if target in allowed_targets:
+                        anchors.append(target)
+                elif raw_target in allowed_targets:
+                    anchors.append(raw_target)
+            found_anchors.update(f'block-{target}' for target in anchors)
+
+            def replace_link(match: re.Match[str]) -> str:
+                raw_target = match.group(2)
+                if raw_target.startswith('block-'):
+                    target = raw_target[len('block-'):]
+                    if target not in allowed_targets:
+                        return match.group(0)
+                    found_targets.add(target)
+                    return f'[](#block-{target})'
+                if raw_target not in allowed_targets:
+                    return match.group(0)
+                found_targets.add(raw_target)
+                return f'[](#block-{raw_target})'
+
+            output.append(cls._MARKDOWN_INTERNAL_LINK_RE.sub(replace_link, line))
+
+        missing_required = [
+            str(item.get('target')) for item in references
+            if item.get('required', True)
+            and str(item.get('target')) not in found_targets
+        ]
+        if missing_required:
+            output.append('')
+            output.append(
+                ' '.join(f'[](#block-{target})' for target in missing_required),
+            )
+            found_targets.update(missing_required)
+
+        for item in references:
+            target = str(item.get('target'))
+            if item.get('must_create') and f'block-{target}' not in found_anchors:
+                raise ValueError(f'Missing created cross-reference anchor {target!r}.')
+            if item.get('required', True) and target not in found_targets:
+                raise ValueError(f'Missing required cross-reference {target!r}.')
+        return '\n'.join(output).strip()
+
+    @staticmethod
+    def _ensure_markdown_outline_anchors(markdown: str) -> str:
+        output: List[str] = []
+        pending_anchors: List[str] = []
+        counters: List[int] = []
+        fence: str | None = None
+        for line in markdown.splitlines():
+            fence_match = re.match(r'^\s*(```+|~~~+)', line)
+            if fence_match:
+                marker = fence_match.group(1)[0]
+                if fence is None:
+                    fence = marker
+                elif fence == marker:
+                    fence = None
+                output.append(line)
+                continue
+            if fence is not None:
+                output.append(line)
+                continue
+
+            anchors = [
+                target
+                for target in WriterDraftingTools._MARKDOWN_ANCHOR_RE.findall(line)
+                if target.startswith('block-sec-')
+            ]
+            if anchors:
+                pending_anchors.extend(anchors)
+                output.append(line)
+                continue
+            heading = re.match(r'^(#{2,6})\s+(.+?)\s*$', line)
+            if heading:
+                depth = len(heading.group(1)) - 1
+                counters = counters[:depth]
+                counters.extend([0] * (depth - len(counters)))
+                counters[-1] += 1
+                expected = 'block-sec-' + '-'.join(
+                    f'{value:03d}' for value in counters
+                )
+                if not pending_anchors:
+                    output.append(f'<a id="{expected}"></a>')
+                elif pending_anchors[0] != expected:
+                    raise ValueError(
+                        f'Unexpected heading anchor {pending_anchors[0]!r}; expected {expected!r}.'
+                    )
+                pending_anchors = []
+            elif line.strip() and pending_anchors:
+                pending_anchors = []
+            output.append(line)
+        return '\n'.join(output)
 
     @staticmethod
     def _media_assets_for_section(

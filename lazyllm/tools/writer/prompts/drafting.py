@@ -29,6 +29,13 @@ Requirements:
   {{"type": "media_asset", "id": "..."}} entry from section_media. Do not invent asset IDs,
   paths, URLs, tokens, placeholders, or image blocks for unresolved needs.
 - Omit spans, provider_binding and provider_payload; the system manages them.
+- Use section_instruction.meta.cross_references as the authoritative cross-reference plan.
+  For each item, the normalized "target" is the exact node_id to use.
+  If must_create=true, create one child WriterBlock with type=item.kind,
+  node_id=target, and content=caption.
+  To reference a target, add an internal_ref span with target_node_id=target and text="".
+  Do not write visible reference text such as "第 1 节", "图 1", "表 1", or "代码 1".
+  Do not invent target_node_id values outside this plan.
 - Emit WriterBlock fields in schema order. In particular, emit numbering and references before content.
 
 Writing task:
@@ -64,6 +71,12 @@ Requirements:
 - If previous Markdown is provided, maintain continuity and avoid repetition.
 - Use ordinary Markdown paragraphs, lists, quotes, fenced code, tables, images, and
   subheadings only when they help the requested content.
+- Use section_instruction.meta.cross_references as the authoritative cross-reference plan.
+  Each item's "target" is the exact system key. When must_create=true, emit
+  <a id="block-<target>"></a> immediately before the created image/table/code block.
+  To reference a target, use [natural text](#block-<target>); the system will clear
+  the display text before saving. Do not write visible numbers such as "第 1 节" or "图 1".
+  Do not invent target keys outside this plan.
 - Return substantial finished prose, not a summary, placeholder, or planning notes.
 
 Writing task:
