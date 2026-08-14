@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import unquote
 
 from ..utils.feishu_docx import DOCX_BLOCK_TYPE_FIELDS, prepare_docx_descendants
 from ..data_models.revision import PatchHunk
@@ -81,6 +82,7 @@ class FeishuWriterAdapter(WriterAdapterBase):
             )
             for index, block_id in enumerate(source_order)
         }
+        self._restore_internal_references(writer_by_id)
         page_ids = {
             block_id
             for block_id in source_order
@@ -133,6 +135,28 @@ class FeishuWriterAdapter(WriterAdapterBase):
             provider_binding=binding,
             ui_editable=False,
         )
+
+    @staticmethod
+    def _restore_internal_references(writer_by_id: Dict[str, WriterBlock]) -> None:
+        for block in writer_by_id.values():
+            changed = False
+            for span in block.spans:
+                link = span.style.get('link')
+                if not isinstance(link, dict):
+                    continue
+                url = unquote(str(link.get('url') or ''))
+                block_id = url.rsplit('#', 1)[-1] if '#' in url else ''
+                target = writer_by_id.get(block_id)
+                if target is None:
+                    continue
+                span.text = ''
+                span.style['link'] = {
+                    'type': 'internal_ref',
+                    'target_node_id': target.node_id,
+                }
+                changed = True
+            if changed and block.spans:
+                block.content = ''.join(span.text for span in block.spans)
 
     @staticmethod
     def _index_raw_blocks(

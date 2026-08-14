@@ -11,9 +11,15 @@ from ..adapter.base import NativePatchOperation, WriterAdapterBase
 from ..adapter.feishu import FeishuWriterAdapter
 from ..data_models.resource import MaterialStyle, ResourceProfile
 from ..data_models.multimodal import MediaAssetLibrary
-from ..data_models.revision import PatchResult, PatchSet
+from ..data_models.revision import PatchHunk, PatchResult, PatchSet
 from ..data_models.task import InputResource, TargetDocument, WritingTask
 from ..data_models.writer_ir import WriterDocument, WriterStage
+from ..numbering import (
+    build_numbering_view_from_ir,
+    compute_numbering,
+    format_reference,
+    materialize_feishu_links,
+)
 from ..prompts.profile_resources import RESOURCE_PROFILE_PROMPT
 from ..utils import parse_document_markdown
 
@@ -280,6 +286,7 @@ class WriterResourceTools(WriterToolBase):
         warnings: List[str] = []
         if source_document is not None:
             document, warnings = self._omit_unavailable_images(document, media_library)
+            document = materialize_feishu_links(document, document_id)
         method_name = 'replace_doc_blocks' if mode == 'replace' else 'write_doc_blocks'
         write_blocks = getattr(fs, method_name, None)
         if not callable(write_blocks):
@@ -346,6 +353,11 @@ class WriterResourceTools(WriterToolBase):
         target = self._unified_optional_model(target_document, TargetDocument) or TargetDocument()
         protocol, real_path, fs, adapter, locator, document_id = \
             self._resolve_document_target(target, source_document=source)
+        numbering = compute_numbering(build_numbering_view_from_ir(source))
+        block_id_by_node_id = {
+            block.node_id: block.provider_binding.get('block_id')
+            for block in source.iter_blocks()
+        }
 
         def refresh(previous: WriterDocument, result: Any = None, **merge_kwargs) -> WriterDocument:
             revision = result.get('document_revision_id') if isinstance(result, dict) else None
@@ -365,6 +377,12 @@ class WriterResourceTools(WriterToolBase):
         title_updated = patch.new_title is not None and patch.new_title != source.title
         normalized_fields: Dict[str, List[str]] = {}
         for hunk in patch.hunks:
+            hunk = self._materialize_hunk_feishu_links(
+                hunk,
+                block_id_by_node_id=block_id_by_node_id,
+                numbering=numbering,
+                document_id=document_id,
+            )
             operation = adapter.patch_to_operation(
                 hunk, persisted_document, media_assets=media_library)
             try:
@@ -435,6 +453,37 @@ class WriterResourceTools(WriterToolBase):
                 'document_id': document_id,
             },
         ).model_dump()
+
+    @staticmethod
+    def _materialize_hunk_feishu_links(
+        hunk: PatchHunk,
+        *,
+        block_id_by_node_id: Dict[str, Any],
+        numbering: Dict[str, Any],
+        document_id: str,
+    ) -> PatchHunk:
+        if hunk.block is None:
+            return hunk
+        hunk = hunk.model_copy(deep=True)
+        block = hunk.block
+        for span in block.spans:
+            link = span.style.get('link')
+            if not isinstance(link, dict) or link.get('type') != 'internal_ref':
+                continue
+            target_id = link.get('target_node_id')
+            target_block_id = block_id_by_node_id.get(target_id)
+            if not target_block_id:
+                span.text = ''
+                continue
+            span.style['link'] = {
+                'url': f'https://feishu.cn/docx/{document_id}#{target_block_id}',
+            }
+            entry = numbering.get(target_id)
+            if entry is not None:
+                span.text = format_reference(entry)
+        if block.spans:
+            block.content = ''.join(span.text for span in block.spans)
+        return hunk
 
     @staticmethod
     def _update_document_title(
