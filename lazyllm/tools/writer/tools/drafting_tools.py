@@ -39,7 +39,7 @@ class WriterDraftingTools(WriterToolBase):
     ]
 
     _MARKDOWN_INTERNAL_LINK_RE = re.compile(r'\[([^\]]*)\]\(#((?:block-)?[^)]+)\)')
-    _CLEARED_LINK_MEASURE_RE = re.compile(r'(\[\]\(#(?:block-)?[^)]+\))(节|图|表|代码)')
+    _CLEARED_LINK_MEASURE_RE = re.compile(r'(\[\]\(#(?:block-)?[^)]+\))(节|图)')
     _MARKDOWN_ANCHOR_RE = re.compile(r'<a id="((?:block-)?[^"]+)"></a>')
 
     def generate_draft_section(
@@ -173,7 +173,7 @@ class WriterDraftingTools(WriterToolBase):
             instruction,
         )
         block = self._condense_ir_section_if_needed(block, instruction)
-        return self._save_ir_draft_section(block, result_extra)
+        return self._save_ir_draft_section(block, result_extra, media_assets)
 
     def _ir_draft_prompt(
         self,
@@ -418,7 +418,7 @@ class WriterDraftingTools(WriterToolBase):
                 item.stage = 'draft'
                 if item.type == 'heading':
                     item.content = strip_heading_numbering(item.content)
-                elif item.type in {'image', 'table', 'code'}:
+                elif item.type == 'image':
                     item.content = strip_caption_numbering(item.content)
         draft_document = WriterDocument(
             document_id=f'draft-document-{context.context_id}',
@@ -723,7 +723,7 @@ class WriterDraftingTools(WriterToolBase):
             block.stage = 'draft'
             if block.type == 'heading':
                 block.content = strip_heading_numbering(block.content)
-            elif block.type in {'image', 'table', 'code'}:
+            elif block.type == 'image':
                 block.content = strip_caption_numbering(block.content)
         draft_block.references = [dict(reference) for reference in instruction.references]
         self._normalize_ir_cross_references(draft_block, instruction)
@@ -740,18 +740,22 @@ class WriterDraftingTools(WriterToolBase):
         ]
         allowed_targets = {str(item.get('target')) for item in references}
         block_by_id = {block.node_id: block for block in draft_block.iter_blocks()}
-        unavailable_must_create: set[str] = set()
         for item in references:
             if not item.get('must_create'):
                 continue
             target = str(item.get('target'))
-            expected_type = str(item.get('kind'))
             target_block = block_by_id.get(target)
-            if target_block is None or target_block.type != expected_type:
-                if expected_type != 'image':
-                    raise ValueError(f'Missing created cross-reference target {target!r}.')
-                unavailable_must_create.add(target)
-                continue
+            if target_block is None or target_block.type != str(item.get('kind')):
+                raise ValueError(f'Missing created cross-reference target {target!r}.')
+            if target_block.type == 'image':
+                media_ids = [
+                    reference.get('id') for reference in target_block.references
+                    if reference.get('type') == 'media_asset' and reference.get('id')
+                ]
+                if len(media_ids) != 1:
+                    raise ValueError(
+                        f'Created image {target!r} requires exactly one media_asset reference.'
+                    )
 
         found_targets: set[str] = set()
         for block in draft_block.iter_blocks():
@@ -771,7 +775,6 @@ class WriterDraftingTools(WriterToolBase):
             str(item.get('target')) for item in references
             if item.get('required', True)
             and str(item.get('target')) not in found_targets
-            and str(item.get('target')) not in unavailable_must_create
         ]
         if missing:
             paragraph = next(
@@ -811,7 +814,6 @@ class WriterDraftingTools(WriterToolBase):
             str(item.get('target')) for item in references
             if item.get('required', True)
             and str(item.get('target')) not in found_targets
-            and str(item.get('target')) not in unavailable_must_create
         ]
         if missing:
             raise ValueError(f'Missing required cross-references: {missing!r}.')

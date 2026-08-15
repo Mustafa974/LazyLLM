@@ -227,9 +227,10 @@ class FeishuWriterAdapter(WriterAdapterBase):
             raw = self._ir_block_to_raw(block, media_library, resolve_internal_ref)
             raw['block_id'] = output_ids[block.node_id]
             raw.pop('children', None)
-            if parent is not None:
+            # Headings are sections, not visual containers.
+            if parent is not None and parent.type != 'heading':
                 raw['parent_id'] = output_ids[parent.node_id]
-            elif raw.get('parent_id') in used_output_ids:
+            else:
                 raw.pop('parent_id', None)
             output.append(raw)
         return output
@@ -708,6 +709,9 @@ class FeishuWriterAdapter(WriterAdapterBase):
             if not isinstance(ordered, bool):
                 raise ValueError('list_item blocks require boolean numbering.ordered.')
             return 13 if ordered else 12
+        if block.type == 'table' and not block.provider_payload:
+            # Caption-only tables degrade to text.
+            return 2
         mapped = _IR_BLOCK_TYPES.get(block.type)
         if mapped is not None:
             return mapped

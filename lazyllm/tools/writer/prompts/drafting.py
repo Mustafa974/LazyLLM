@@ -32,13 +32,18 @@ Requirements:
   Its content is the final Chinese caption and references must contain exactly one
   {{"type": "media_asset", "id": "..."}} entry from section_media. Do not invent asset IDs,
   paths, URLs, tokens, placeholders, or image blocks for unresolved needs.
+  The image block node_id is the cross-reference target, but its media_asset id is not that
+  target; copy the exact matching media_asset_id from section_media.
+  Example: when target is "image-sec-1-01" and section_media has media_asset_id "asset-abc",
+  emit node_id="image-sec-1-01" and references=[{{"type":"media_asset","id":"asset-abc"}}].
 - Omit spans, provider_binding and provider_payload; the system manages them.
 - Use section_instruction.meta.cross_references as the authoritative cross-reference plan.
   For each item, the normalized "target" is the exact node_id to use.
-  If must_create=true, create one child WriterBlock with type=item.kind,
+  If must_create=true, create one child WriterBlock with type="image",
   node_id=target, and content=caption.
   To reference a target, add an internal_ref span with target_node_id=target and text="".
-  Do not write visible reference text such as "第 1 节", "图 1", "表 1", or "代码 1".
+  Reference each planned target at most once, and use no references beyond this plan.
+  Do not write visible reference text such as "第 1 节" or "图 1".
   Do not invent target_node_id values outside this plan.
 - Emit WriterBlock fields in schema order. In particular, emit numbering and references before content.
 
@@ -85,7 +90,8 @@ Requirements:
   Each item's "target" is the exact system key. When must_create=true, emit
   <a id="block-<target>"></a> immediately before the created image/table/code block.
   To reference a target, use [natural text](#block-<target>); the system will clear
-  the display text before saving. Do not write visible numbers such as "第 1 节" or "图 1".
+  the display text before saving. Reference each planned target at most once, and use no
+  references beyond this plan. Do not write visible numbers such as "第 1 节" or "图 1".
   Do not invent target keys outside this plan.
 - Return substantial finished prose, not a summary, placeholder, or planning notes.
 

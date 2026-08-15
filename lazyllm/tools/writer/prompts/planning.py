@@ -223,14 +223,15 @@ Requirements:
 - For a normal-length section, expected_blocks should usually contain 3 to 6 planned content
   blocks. Use fewer and merge coverage cues when the total document budget is short.
 - expected_blocks are planning labels for coverage and ordering, not visible headings that must appear in final text.
-- When this section should refer to another section, add an object to
-   meta.cross_references with target_ref, required=true, and concise guidance.
+- Add a section cross-reference only when it materially helps the reader navigate a real
+   dependency. A normal section has zero or one such reference; use two only when the section
+   genuinely depends on both targets. Never fill every section with references.
    For Writer IR, target_ref is {{"node_id": "..."}} copied from the outline.
    For Markdown, target_ref is the target section's {{"heading_path": [...], "occurrence": 1}}.
-- When this section must create and reference an image, table, or code block, add an object to
-   meta.cross_references with must_create=true, kind="image"|"table"|"code", a concrete caption,
+- When this section must create and reference an image, add an object to
+   meta.cross_references with must_create=true, kind="image", a concrete caption,
    required=true, and concise guidance. Do not invent the final target ID; the system assigns it.
-- Do not write visible reference numbers such as “第 1 节”, “图 1”, “表 1”, or “代码 1”.
+- Do not write visible reference numbers such as “第 1 节” or “图 1”.
 - Do not invent facts that conflict with writing context.
 
 Writing task:

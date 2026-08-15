@@ -105,7 +105,6 @@ def _markdown_semantic_items(markdown: str):
             yield index, line, 'table', '', pending_anchors
             pending_anchors = []
 
-
 def _iter_blocks(blocks: list[WriterBlock]):
     for block in blocks:
         yield block
@@ -292,6 +291,13 @@ def materialize_markdown(markdown: str) -> str:
     output: list[str] = []
     fence: str | None = None
     lines = markdown.splitlines()
+
+    def replace_link(match: re.Match[str]) -> str:
+        entry = numbering.get(decode_anchor_id(match.group(2)))
+        if entry is None:
+            return match.group(0)
+        return f'[{format_reference(entry)}](#{match.group(2)})'
+
     for index, line in enumerate(lines):
         fence_match = _CODE_FENCE_RE.match(line)
         if fence_match:
@@ -345,11 +351,7 @@ def materialize_markdown(markdown: str) -> str:
                     last = image.end()
                 pieces.append(line[last:])
                 line = ''.join(pieces)
-        for link in list(_INTERNAL_LINK_RE.finditer(line)):
-            target_id = decode_anchor_id(link.group(2))
-            entry = numbering.get(target_id)
-            if entry is not None:
-                line = line[:link.start()] + f'[{format_reference(entry)}](#{link.group(2)})' + line[link.end():]
+        line = _INTERNAL_LINK_RE.sub(replace_link, line)
         output.append(line)
     return '\n'.join(output)
 
@@ -369,6 +371,8 @@ def dematerialize_ir(
             link = span.style.get('link')
             if isinstance(link, dict) and link.get('type') == 'internal_ref':
                 span.text = ''
+        if block.spans:
+            block.content = ''.join(span.text for span in block.spans)
     return result
 
 

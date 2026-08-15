@@ -332,6 +332,7 @@ class WriterPlanningTools(WriterToolBase):
     @staticmethod
     def _normalize_visual_plan(visual_plan: VisualPlan, outline: WriterDocument) -> VisualPlan:
         node_ids = {block.node_id for block in outline.blocks if block.type == 'heading'}
+        canonical_ids = WriterPlanningTools._ir_outline_node_ids_from_outline(outline)
         counts: Dict[str, int] = {}
         for need in visual_plan.instructions:
             ref = need.content_ref
@@ -345,8 +346,10 @@ class WriterPlanningTools(WriterToolBase):
                 raise ValueError(f'Visual need for {node_id!r} has an empty purpose.')
             if need.preferred_strategy is None:
                 need.preferred_strategy = _VISUAL_STRATEGY_ORDER[need.visual_type][0]
-            counts[node_id] = counts.get(node_id, 0) + 1
-            need.need_id = f'visual-{node_id}-{counts[node_id]}'
+            canonical_id = canonical_ids[node_id]
+            counts[canonical_id] = counts.get(canonical_id, 0) + 1
+            need.need_id = f'visual-{canonical_id}-{counts[canonical_id]}'
+            need.content_ref.node_id = canonical_id
         return visual_plan
 
     @staticmethod
@@ -587,23 +590,19 @@ class WriterPlanningTools(WriterToolBase):
                 'cross_references must be a list.'
             )
 
-        local_counts: Dict[str, int] = {}
+        created_count = 0
         normalized: List[Dict[str, Any]] = []
         for item in raw_references:
             if not isinstance(item, dict):
                 raise ValueError('Each cross-reference must be an object.')
             must_create = bool(item.get('must_create'))
-            kind = str(item.get('kind') or '').strip()
             if must_create:
-                if kind not in {'image', 'table', 'code'}:
-                    raise ValueError(
-                        f'Created cross-reference kind must be image, table, or code; got {kind!r}.'
-                    )
+                created_count += 1
+                kind = 'image'
                 caption = str(item.get('caption') or '').strip()
                 if not caption:
                     caption = instruction.section_title.strip() or f'{kind}-{section_id}'
-                local_counts[kind] = local_counts.get(kind, 0) + 1
-                target = f'{kind}-{section_id}-{local_counts[kind]:02d}'
+                target = f'{kind}-{section_id}-{created_count:02d}'
             else:
                 target_ref = item.get('target_ref')
                 target = cls._resolve_cross_reference_target(
