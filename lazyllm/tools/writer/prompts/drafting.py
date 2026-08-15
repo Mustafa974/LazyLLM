@@ -7,6 +7,7 @@ Requirements:
 - The section's actual prose lives in the block's children. Use paragraph blocks for prose.
 - A paragraph child usually represents one substantial paragraph or paragraph group.
 - The section instruction is a writing plan, not a list of visible headings.
+- Do not add visible heading numbers such as "1", "1.1", "一、", or "第 1 节".
 - Use expected_blocks to guide coverage and ordering, but do not copy them verbatim as headings.
 - Treat expected_blocks as priorities, not minimum paragraph counts. Combine or omit
   secondary cues when necessary to fit the section budget.
@@ -70,6 +71,7 @@ Requirements:
 - section_instruction.meta.target_chars is the preferred prose length and
   section_instruction.meta.max_chars is a hard prose limit when present.
 - The length limit takes precedence over exhaustive source coverage or prose expansion.
+- Do not add visible heading numbers such as "1", "1.1", "一、", or "第 1 节".
 - Respect required_points, fact_constraints, style_constraints, and relation_constraints.
 - When section_instruction.meta.rewrite=true, treat meta.source_content as the authoritative
   source material for this section and meta.source_format as formatting guidance. Rewrite it

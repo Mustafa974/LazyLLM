@@ -8,6 +8,7 @@ Requirements:
 - Add at least one H2 section directly under the H1 title.
 - Every H2 section title must be unique.
 - Use H3-H6 only for optional subsection planning under an H2 section.
+- Do not include visible heading numbers such as "1", "1.1", "一、", or "第 1 节".
 - Treat the outline as the exact structural skeleton of the final deliverable: every H2
   will become a visible section in the drafted document.
 - Do not create meta-planning H2 sections such as background and setting, character
@@ -70,6 +71,7 @@ Requirements:
 - Fill node_id for every block. Use stable ids such as section-1, section-2, section-1-1.
 - Use block.numbering.level for the heading level: 1 for top-level sections, incrementing for children.
   Put child sections under block.children as heading blocks alongside any visible description blocks.
+- Do not include visible heading numbers such as "1", "1.1", "一、", or "第 1 节".
 - block.references holds identifiers for facts or resources the section depends on.
 - Each element of block.references is an object with at least an "id" field. The id must match a
   DocumentFact.fact_id or ResourceProfile.resource_id present in the input.

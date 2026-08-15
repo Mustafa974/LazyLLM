@@ -717,6 +717,151 @@ class FeishuFSBase(LinkDocumentFSBase):
                 f'Failed to bind {len(binding_errors)} Feishu image block(s).') from binding_errors[0]
         return revision
 
+    def _bind_docx_links(
+        self,
+        document_id: str,
+        blocks: List[Dict[str, Any]],
+        created: Dict[str, Any],
+        document_revision_id: int = -1,
+    ) -> int:
+        temporary_to_created = {
+            relation.get('temporary_block_id'): relation.get('block_id')
+            for relation in created.get('block_id_relations') or []
+            if isinstance(relation, dict)
+            and isinstance(relation.get('temporary_block_id'), str)
+            and isinstance(relation.get('block_id'), str)
+        }
+        if not temporary_to_created:
+            return document_revision_id
+
+        requests: List[Dict[str, Any]] = []
+        for block in blocks:
+            created_block_id = temporary_to_created.get(block.get('block_id'))
+            if not created_block_id and block.get('block_id') in temporary_to_created.values():
+                created_block_id = block.get('block_id')
+            if not created_block_id:
+                continue
+            content_field = DOCX_BLOCK_TYPE_FIELDS.get(block.get('block_type'))
+            if not content_field:
+                continue
+            content = block.get(content_field) or {}
+            elements = content.get('elements') or []
+            if not isinstance(elements, list):
+                continue
+
+            updated_elements: List[Dict[str, Any]] = []
+            changed = False
+            for element in elements:
+                text_run = element.get('text_run') if isinstance(element, dict) else None
+                style = (text_run or {}).get('text_element_style') if isinstance(text_run, dict) else None
+                link = (style or {}).get('link') if isinstance(style, dict) else None
+                if not isinstance(link, dict) or not link.get('url'):
+                    updated_elements.append(element)
+                    continue
+                url = str(link['url'])
+                fragment = urlparse(url).fragment
+                target_created = temporary_to_created.get(fragment)
+                if not target_created:
+                    updated_elements.append(element)
+                    continue
+                new_element = deepcopy(element)
+                new_element['text_run']['text_element_style']['link']['url'] = (
+                    url.split('#', 1)[0] + '#' + target_created
+                )
+                updated_elements.append(new_element)
+                changed = True
+
+            if changed:
+                requests.append({
+                    'block_id': created_block_id,
+                    'update_text_elements': {'elements': updated_elements},
+                })
+
+        if not requests:
+            return document_revision_id
+        updated = self._batch_update_blocks(
+            document_id, requests, document_revision_id=document_revision_id,
+        )
+        try:
+            return int(updated.get('document_revision_id', document_revision_id))
+        except (TypeError, ValueError):
+            return document_revision_id
+
+    def _enable_docx_heading_sequence(
+        self,
+        document_id: str,
+        document_revision_id: int,
+    ) -> int:
+        fetch_url = f'{self._base_url}/docs_ai/v1/documents/{document_id}/fetch'
+        old_document = ((self._post(fetch_url, json={'format': 'xml'}) or {})
+                        .get('data') or {}).get('document') or {}
+        content = old_document.get('content') or ''
+        if not re.search(r'<h[1-9]\b', content):
+            return document_revision_id
+
+        def xml_ids(value: str) -> List[Tuple[str, str]]:
+            from xml.etree import ElementTree
+            root = ElementTree.fromstring(f'<root>{value}</root>')
+            return [
+                (element.tag, element.attrib['id'])
+                for element in root.iter()
+                if 'id' in element.attrib
+                and not (element.tag == 'p' and not (element.text or '').strip() and not len(element))
+            ]
+
+        old_ids = xml_ids(content)
+
+        def with_sequence(match: re.Match[str]) -> str:
+            attrs = re.sub(r'\s+(?:seq|seq-level)="[^"]*"', '', match.group(2))
+            return f'<{match.group(1)}{attrs} seq="auto" seq-level="auto">'
+
+        content = re.sub(r'<(h[1-9])([^>]*)>', with_sequence, content)
+        content = re.sub(r'(<h[1-9]\b[^>]*>)(?:\d+(?:\.\d+)*\s+)', r'\1', content)
+        update_url = f'{self._base_url}/docs_ai/v1/documents/{document_id}'
+        updated = self._put(update_url, json={
+            'format': 'xml',
+            'command': 'overwrite',
+            'content': content,
+            'revision_id': document_revision_id,
+        }) or {}
+        if updated.get('code', 0) != 0:
+            raise RuntimeError(
+                f'Feishu XML heading numbering failed: {updated.get("msg", updated)}')
+        try:
+            document_revision_id = int(
+                ((updated.get('data') or {}).get('document') or {})
+                .get('revision_id', document_revision_id))
+        except (TypeError, ValueError):
+            pass
+
+        new_document = ((self._post(fetch_url, json={'format': 'xml'}) or {})
+                        .get('data') or {}).get('document') or {}
+        new_ids = xml_ids(new_document.get('content') or '')
+        old_tags = [tag for tag, _ in old_ids]
+        new_tags = [tag for tag, _ in new_ids]
+        if old_tags != new_tags:
+            diff = next(
+                (index for index, tags in enumerate(zip(old_tags, new_tags))
+                 if tags[0] != tags[1]),
+                min(len(old_tags), len(new_tags)),
+            )
+            raise RuntimeError(
+                'Feishu XML overwrite changed the document block structure '
+                f'at {diff}: {old_ids[diff:diff + 3]} -> {new_ids[diff:diff + 3]}.')
+        relations = {
+            'block_id_relations': [
+                {'temporary_block_id': old_id, 'block_id': new_id}
+                for (_, old_id), (_, new_id) in zip(old_ids, new_ids)
+                if old_id != new_id
+            ],
+        }
+        return self._bind_docx_links(
+            document_id,
+            self._get_doc_blocks_raw(document_id, with_descendants=True),
+            relations,
+            document_revision_id=document_revision_id,
+        )
+
     def create_block(
         self,
         document_id: str,
@@ -747,6 +892,8 @@ class FeishuFSBase(LinkDocumentFSBase):
             raise_on_error=True,
             parent_block_id=parent_block_id,
         )
+        revision = self._bind_docx_links(
+            document_id, descendants, created, document_revision_id=revision)
         created['document_revision_id'] = revision
         return created
 
@@ -1146,6 +1293,7 @@ class FeishuFSBase(LinkDocumentFSBase):
         self,
         document_id: str,
         blocks: List[Dict[str, Any]],
+        number_headings: bool = False,
     ) -> List[Dict[str, Any]]:
         '''Append native blocks to an existing Feishu document.'''
         if not isinstance(blocks, list):
@@ -1160,13 +1308,20 @@ class FeishuFSBase(LinkDocumentFSBase):
                 document_revision_id = int(created.get('document_revision_id', -1))
             except (TypeError, ValueError):
                 document_revision_id = -1
-            self._bind_docx_images(document_id, blocks, created, document_revision_id)
+            document_revision_id = self._bind_docx_images(
+                document_id, blocks, created, document_revision_id)
+            document_revision_id = self._bind_docx_links(
+                document_id, blocks, created, document_revision_id)
+            if number_headings:
+                document_revision_id = self._enable_docx_heading_sequence(
+                    document_id, document_revision_id)
         return self._get_doc_blocks_raw(document_id, with_descendants=True)
 
     def replace_doc_blocks(
         self,
         document_id: str,
         blocks: List[Dict[str, Any]],
+        number_headings: bool = False,
     ) -> List[Dict[str, Any]]:
         '''Replace all root content blocks in an existing Feishu document.'''
         if not isinstance(blocks, list):
@@ -1192,6 +1347,8 @@ class FeishuFSBase(LinkDocumentFSBase):
                 document_revision_id = -1
             document_revision_id = self._bind_docx_images(
                 document_id, blocks, created, document_revision_id)
+            document_revision_id = self._bind_docx_links(
+                document_id, blocks, created, document_revision_id)
 
         # Insert first so a failed write never destroys the existing document.
         if existing_count:
@@ -1202,6 +1359,9 @@ class FeishuFSBase(LinkDocumentFSBase):
                 existing_count,
                 document_revision_id=document_revision_id,
             )
+        if number_headings:
+            document_revision_id = self._enable_docx_heading_sequence(
+                document_id, document_revision_id)
         return self._get_doc_blocks_raw(document_id, with_descendants=True)
 
     def _get_table_cells(self, document_id: str, table_block_id: str) -> List[Dict[str, Any]]:

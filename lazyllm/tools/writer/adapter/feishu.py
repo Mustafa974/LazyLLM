@@ -15,6 +15,7 @@ from ..data_models.writer_ir import (
     WriterSpan,
     WriterStage,
 )
+from ..numbering import build_numbering_view_from_ir, compute_numbering, format_reference
 from .base import NativeBlock, NativePatchOperation, WriterAdapterBase
 
 
@@ -205,9 +206,25 @@ class FeishuWriterAdapter(WriterAdapterBase):
             output_ids[block.node_id] = output_id
             used_output_ids.add(output_id)
 
+        numbering = compute_numbering(build_numbering_view_from_ir(document))
+        external_document_id = document.provider_binding.get('document_id') or ''
+
+        def resolve_internal_ref(span: WriterSpan) -> tuple[str, str] | None:
+            link = span.style.get('link')
+            if not isinstance(link, dict) or link.get('type') != 'internal_ref':
+                return None
+            target_id = link.get('target_node_id')
+            target_block_id = output_ids.get(target_id) if isinstance(target_id, str) else None
+            if not target_block_id:
+                return '', ''
+            entry = numbering.get(target_id)
+            text = format_reference(entry) if entry is not None else ''
+            url = f'https://feishu.cn/docx/{external_document_id}#{target_block_id}'
+            return text, url
+
         output: List[NativeBlock] = []
         for block, parent in flat_blocks:
-            raw = self._ir_block_to_raw(block, media_library)
+            raw = self._ir_block_to_raw(block, media_library, resolve_internal_ref)
             raw['block_id'] = output_ids[block.node_id]
             raw.pop('children', None)
             if parent is not None:
@@ -582,12 +599,17 @@ class FeishuWriterAdapter(WriterAdapterBase):
         self,
         block: WriterBlock,
         media_assets: Optional[MediaAssetLibrary] = None,
+        internal_ref_resolver: Any = None,
     ) -> NativeBlock:
         if block.type == 'image':
             return self._ir_image_block_to_raw(block, media_assets)
-        return self._ir_non_image_block_to_raw(block)
+        return self._ir_non_image_block_to_raw(block, internal_ref_resolver)
 
-    def _ir_non_image_block_to_raw(self, block: WriterBlock) -> NativeBlock:
+    def _ir_non_image_block_to_raw(
+        self,
+        block: WriterBlock,
+        internal_ref_resolver: Any = None,
+    ) -> NativeBlock:
         original = self._raw_payload(block)
         raw = deepcopy(original)
         original_type = original.get('block_type')
@@ -628,7 +650,8 @@ class FeishuWriterAdapter(WriterAdapterBase):
         if block_type == 22:
             content_payload = {}
         elif block_type in _TEXT_BLOCK_TYPES:
-            content_payload['elements'] = self._spans_to_elements(block)
+            content_payload['elements'] = self._spans_to_elements(
+                block, internal_ref_resolver)
         raw[content_field] = content_payload
         raw['plain_text'] = block.content
         return raw
@@ -798,7 +821,11 @@ class FeishuWriterAdapter(WriterAdapterBase):
         return ''
 
     @classmethod
-    def _spans_to_elements(cls, block: WriterBlock) -> List[Dict[str, Any]]:
+    def _spans_to_elements(
+        cls,
+        block: WriterBlock,
+        internal_ref_resolver: Any = None,
+    ) -> List[Dict[str, Any]]:
         if not block.spans:
             return cls._plain_text_elements(block.content)
         elements: List[Dict[str, Any]] = []
@@ -818,9 +845,19 @@ class FeishuWriterAdapter(WriterAdapterBase):
                 if field in span.style
             })
             link = span.style.get('link')
+            span_text = span.text
+            link_url: Optional[str] = None
             if isinstance(link, dict) and isinstance(link.get('url'), str):
-                raw_style['link'] = {'url': link['url']}
-            text_run: Dict[str, Any] = {'content': span.text}
+                link_url = link['url']
+            elif internal_ref_resolver is not None:
+                resolved = internal_ref_resolver(span)
+                if resolved is not None:
+                    text, url = resolved
+                    span_text = text if text else span.text
+                    link_url = url or None
+            if link_url:
+                raw_style['link'] = {'url': link_url}
+            text_run: Dict[str, Any] = {'content': span_text}
             if raw_style:
                 text_run['text_element_style'] = raw_style
             elements.append({'text_run': text_run})

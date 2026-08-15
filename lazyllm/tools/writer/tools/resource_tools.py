@@ -18,6 +18,7 @@ from ..numbering import (
     build_numbering_view_from_ir,
     compute_numbering,
     format_reference,
+    materialize_ir,
     materialize_feishu_links,
 )
 from ..prompts.profile_resources import RESOURCE_PROFILE_PROMPT
@@ -279,6 +280,12 @@ class WriterResourceTools(WriterToolBase):
         document = source_document or parse_document_markdown(
             source, document_id=adapter.make_document_id(document_id), stage='final',
         )
+        if not document.provider_binding.get('document_id'):
+            document.provider_binding = {
+                **(document.provider_binding or {}),
+                'provider': protocol,
+                'document_id': document_id,
+            }
         media_library = (
             self._unified_optional_model(media_assets, MediaAssetLibrary)
             if source_document is not None else None
@@ -286,6 +293,8 @@ class WriterResourceTools(WriterToolBase):
         warnings: List[str] = []
         if source_document is not None:
             document, warnings = self._omit_unavailable_images(document, media_library)
+            numbering = compute_numbering(build_numbering_view_from_ir(document))
+            document = materialize_ir(document, numbering)
             document = materialize_feishu_links(document, document_id)
         method_name = 'replace_doc_blocks' if mode == 'replace' else 'write_doc_blocks'
         write_blocks = getattr(fs, method_name, None)
@@ -298,7 +307,7 @@ class WriterResourceTools(WriterToolBase):
         if not native_blocks:
             warnings.append('No publishable blocks remain after media filtering.')
             return self._save_write_result(document_id, protocol, locator, 0, warnings)
-        write_blocks(document_id, native_blocks)
+        write_blocks(document_id, native_blocks, number_headings=True)
         return self._save_write_result(document_id, protocol, locator, len(native_blocks), warnings)
 
     def _omit_unavailable_images(

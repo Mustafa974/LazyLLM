@@ -269,7 +269,10 @@ def materialize_feishu_links(
             target_id = link.get('target_node_id')
             target_block_id = block_id_by_node_id.get(target_id)
             if not target_block_id:
-                span.text = ''
+                span.text = format_reference(numbering[target_id]) if target_id in numbering else span.text
+                span.style['link'] = {
+                    'url': f'https://{host}/docx/{document_token}#{target_id}',
+                }
                 continue
             span.style['link'] = {
                 'url': f'https://{host}/docx/{document_token}#{target_block_id}',

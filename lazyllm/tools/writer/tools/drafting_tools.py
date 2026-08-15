@@ -26,6 +26,8 @@ from ..utils import (
     make_markdown_tool_result,
     parse_markdown_sections,
     render_document_markdown,
+    strip_caption_numbering,
+    strip_heading_numbering,
     to_prompt_json,
 )
 
@@ -37,6 +39,7 @@ class WriterDraftingTools(WriterToolBase):
     ]
 
     _MARKDOWN_INTERNAL_LINK_RE = re.compile(r'\[([^\]]*)\]\(#((?:block-)?[^)]+)\)')
+    _CLEARED_LINK_MEASURE_RE = re.compile(r'(\[\]\(#(?:block-)?[^)]+\))(节|图|表|代码)')
     _MARKDOWN_ANCHOR_RE = re.compile(r'<a id="((?:block-)?[^"]+)"></a>')
 
     def generate_draft_section(
@@ -315,6 +318,7 @@ class WriterDraftingTools(WriterToolBase):
         if not body:
             raise ValueError('Markdown draft section body must not be empty.')
         body = self._normalize_markdown_draft_body(body)
+        body = self._strip_system_section_anchors(body)
         if not body:
             raise ValueError('Markdown draft section body contains only headings, no content.')
         heading = self._markdown_draft_heading(instruction)
@@ -412,6 +416,10 @@ class WriterDraftingTools(WriterToolBase):
         for block in writer_blocks:
             for item in block.iter_blocks():
                 item.stage = 'draft'
+                if item.type == 'heading':
+                    item.content = strip_heading_numbering(item.content)
+                elif item.type in {'image', 'table', 'code'}:
+                    item.content = strip_caption_numbering(item.content)
         draft_document = WriterDocument(
             document_id=f'draft-document-{context.context_id}',
             stage='draft',
@@ -642,15 +650,39 @@ class WriterDraftingTools(WriterToolBase):
 
             m = re.match(r'^(#{1,2})\s+(.+?)\s*$', line)
             if m:
+                title = strip_heading_numbering(m.group(2))
                 if seen_content:
-                    result.append(f'### {m.group(2).strip()}')
+                    result.append(f'### {title}')
                 continue
+
+            subheading = re.match(r'^(#{3,6})\s+(.+?)\s*$', line)
+            if subheading:
+                result.append(
+                    f'{subheading.group(1)} '
+                    f'{strip_heading_numbering(subheading.group(2))}'
+                )
+                seen_content = True
+                continue
+
+            line = re.sub(
+                r'!\[([^\]]*)\]',
+                lambda image: f'![{strip_caption_numbering(image.group(1))}]',
+                line,
+            )
 
             if stripped:
                 seen_content = True
             result.append(line)
 
         return '\n'.join(result).strip()
+
+    @staticmethod
+    def _strip_system_section_anchors(body: str) -> str:
+        '''Remove LLM-created section anchors; the prefix emits the only section anchor.'''
+        def remove_anchor(match: re.Match[str]) -> str:
+            return '' if match.group(1).startswith('block-sec-') else match.group(0)
+
+        return WriterDraftingTools._MARKDOWN_ANCHOR_RE.sub(remove_anchor, body)
 
     @staticmethod
     def _validate_markdown_draft_section(
@@ -685,10 +717,14 @@ class WriterDraftingTools(WriterToolBase):
         draft_block.node_id = section_id
         draft_block.stage = 'draft'
         draft_block.type = 'heading'
-        draft_block.content = instruction.section_title
+        draft_block.content = strip_heading_numbering(instruction.section_title)
         draft_block.numbering['level'] = 1
         for block in draft_block.iter_blocks():
             block.stage = 'draft'
+            if block.type == 'heading':
+                block.content = strip_heading_numbering(block.content)
+            elif block.type in {'image', 'table', 'code'}:
+                block.content = strip_caption_numbering(block.content)
         draft_block.references = [dict(reference) for reference in instruction.references]
         self._normalize_ir_cross_references(draft_block, instruction)
         return draft_block
@@ -832,7 +868,9 @@ class WriterDraftingTools(WriterToolBase):
                 found_targets.add(raw_target)
                 return f'[](#block-{raw_target})'
 
-            output.append(cls._MARKDOWN_INTERNAL_LINK_RE.sub(replace_link, line))
+            line = cls._MARKDOWN_INTERNAL_LINK_RE.sub(replace_link, line)
+            line = cls._CLEARED_LINK_MEASURE_RE.sub(r'\1', line)
+            output.append(line)
 
         missing_required = [
             str(item.get('target')) for item in references

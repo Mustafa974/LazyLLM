@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import Any, Dict, List, Literal
+import re
+from typing import Any, Dict, List, Literal, Optional
 
 from .base import WriterToolBase
 from .stream_tools import DraftPreviewStream, build_outline_stream
@@ -23,6 +24,7 @@ from ..utils import (
     parse_markdown_sections,
     render_block_markdown,
     render_document_markdown,
+    strip_heading_numbering,
     to_prompt_json,
 )
 
@@ -57,6 +59,7 @@ class WriterPlanningTools(WriterToolBase):
                 execution_results_json=to_prompt_json(execution_data),
             )
             outline = self._call_llm_text(prompt).strip() + '\n'
+            outline = self._normalize_markdown_outline(outline)
             _, targets = get_markdown_outline_targets(outline)
             path = self._write_markdown_artifact('outline.md', outline)
             return make_markdown_tool_result(
@@ -356,6 +359,31 @@ class WriterPlanningTools(WriterToolBase):
             raise ValueError("representation must be 'ir' or 'markdown'.")
         return resolved
 
+    @staticmethod
+    def _normalize_markdown_outline(outline: str) -> str:
+        lines: List[str] = []
+        fence: Optional[str] = None
+        for line in outline.splitlines():
+            fence_match = re.match(r'^\s*(```+|~~~+)', line)
+            if fence_match:
+                marker = fence_match.group(1)[0]
+                if fence is None:
+                    fence = marker
+                elif fence == marker:
+                    fence = None
+                lines.append(line)
+                continue
+            if fence is not None:
+                lines.append(line)
+                continue
+            heading = re.match(r'^(#{1,6})\s+(.+?)\s*$', line)
+            if heading:
+                title = strip_heading_numbering(heading.group(2))
+                lines.append(f'{heading.group(1)} {title}')
+                continue
+            lines.append(line)
+        return '\n'.join(lines).rstrip() + '\n'
+
     def _normalize_outline(
         self,
         outline: WriterDocument,
@@ -379,6 +407,8 @@ class WriterPlanningTools(WriterToolBase):
             block, level = pending.pop()
             block.stage = 'outline'
             block.numbering['level'] = level
+            if block.type == 'heading':
+                block.content = strip_heading_numbering(block.content)
             block.references = [
                 reference
                 for reference in block.references
@@ -492,7 +522,7 @@ class WriterPlanningTools(WriterToolBase):
             key = (tuple(heading_path), occurrence)
             instruction = instruction_by_ref[key]
             self._validate_instruction(instruction, '/'.join(heading_path))
-            instruction.section_title = heading_path[-1]
+            instruction.section_title = strip_heading_numbering(heading_path[-1])
             instruction.references = []
             if not context.facts:
                 instruction.fact_constraints = []
