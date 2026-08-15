@@ -787,81 +787,6 @@ class FeishuFSBase(LinkDocumentFSBase):
         except (TypeError, ValueError):
             return document_revision_id
 
-    def _enable_docx_heading_sequence(
-        self,
-        document_id: str,
-        document_revision_id: int,
-    ) -> int:
-        fetch_url = f'{self._base_url}/docs_ai/v1/documents/{document_id}/fetch'
-        old_document = ((self._post(fetch_url, json={'format': 'xml'}) or {})
-                        .get('data') or {}).get('document') or {}
-        content = old_document.get('content') or ''
-        if not re.search(r'<h[1-9]\b', content):
-            return document_revision_id
-
-        def xml_ids(value: str) -> List[Tuple[str, str]]:
-            from xml.etree import ElementTree
-            root = ElementTree.fromstring(f'<root>{value}</root>')
-            return [
-                (element.tag, element.attrib['id'])
-                for element in root.iter()
-                if 'id' in element.attrib
-                and not (element.tag == 'p' and not (element.text or '').strip() and not len(element))
-            ]
-
-        old_ids = xml_ids(content)
-
-        def with_sequence(match: re.Match[str]) -> str:
-            attrs = re.sub(r'\s+(?:seq|seq-level)="[^"]*"', '', match.group(2))
-            return f'<{match.group(1)}{attrs} seq="auto" seq-level="auto">'
-
-        content = re.sub(r'<(h[1-9])([^>]*)>', with_sequence, content)
-        content = re.sub(r'(<h[1-9]\b[^>]*>)(?:\d+(?:\.\d+)*\s+)', r'\1', content)
-        update_url = f'{self._base_url}/docs_ai/v1/documents/{document_id}'
-        updated = self._put(update_url, json={
-            'format': 'xml',
-            'command': 'overwrite',
-            'content': content,
-            'revision_id': document_revision_id,
-        }) or {}
-        if updated.get('code', 0) != 0:
-            raise RuntimeError(
-                f'Feishu XML heading numbering failed: {updated.get("msg", updated)}')
-        try:
-            document_revision_id = int(
-                ((updated.get('data') or {}).get('document') or {})
-                .get('revision_id', document_revision_id))
-        except (TypeError, ValueError):
-            pass
-
-        new_document = ((self._post(fetch_url, json={'format': 'xml'}) or {})
-                        .get('data') or {}).get('document') or {}
-        new_ids = xml_ids(new_document.get('content') or '')
-        old_tags = [tag for tag, _ in old_ids]
-        new_tags = [tag for tag, _ in new_ids]
-        if old_tags != new_tags:
-            diff = next(
-                (index for index, tags in enumerate(zip(old_tags, new_tags))
-                 if tags[0] != tags[1]),
-                min(len(old_tags), len(new_tags)),
-            )
-            raise RuntimeError(
-                'Feishu XML overwrite changed the document block structure '
-                f'at {diff}: {old_ids[diff:diff + 3]} -> {new_ids[diff:diff + 3]}.')
-        relations = {
-            'block_id_relations': [
-                {'temporary_block_id': old_id, 'block_id': new_id}
-                for (_, old_id), (_, new_id) in zip(old_ids, new_ids)
-                if old_id != new_id
-            ],
-        }
-        return self._bind_docx_links(
-            document_id,
-            self._get_doc_blocks_raw(document_id, with_descendants=True),
-            relations,
-            document_revision_id=document_revision_id,
-        )
-
     def create_block(
         self,
         document_id: str,
@@ -1293,7 +1218,6 @@ class FeishuFSBase(LinkDocumentFSBase):
         self,
         document_id: str,
         blocks: List[Dict[str, Any]],
-        number_headings: bool = False,
     ) -> List[Dict[str, Any]]:
         '''Append native blocks to an existing Feishu document.'''
         if not isinstance(blocks, list):
@@ -1312,16 +1236,12 @@ class FeishuFSBase(LinkDocumentFSBase):
                 document_id, blocks, created, document_revision_id)
             document_revision_id = self._bind_docx_links(
                 document_id, blocks, created, document_revision_id)
-            if number_headings:
-                document_revision_id = self._enable_docx_heading_sequence(
-                    document_id, document_revision_id)
         return self._get_doc_blocks_raw(document_id, with_descendants=True)
 
     def replace_doc_blocks(
         self,
         document_id: str,
         blocks: List[Dict[str, Any]],
-        number_headings: bool = False,
     ) -> List[Dict[str, Any]]:
         '''Replace all root content blocks in an existing Feishu document.'''
         if not isinstance(blocks, list):
@@ -1359,9 +1279,6 @@ class FeishuFSBase(LinkDocumentFSBase):
                 existing_count,
                 document_revision_id=document_revision_id,
             )
-        if number_headings:
-            document_revision_id = self._enable_docx_heading_sequence(
-                document_id, document_revision_id)
         return self._get_doc_blocks_raw(document_id, with_descendants=True)
 
     def _get_table_cells(self, document_id: str, table_block_id: str) -> List[Dict[str, Any]]:

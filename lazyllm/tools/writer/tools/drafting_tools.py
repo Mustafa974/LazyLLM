@@ -39,7 +39,6 @@ class WriterDraftingTools(WriterToolBase):
     ]
 
     _MARKDOWN_INTERNAL_LINK_RE = re.compile(r'\[([^\]]*)\]\(#((?:block-)?[^)]+)\)')
-    _CLEARED_LINK_MEASURE_RE = re.compile(r'(\[\]\(#(?:block-)?[^)]+\))(节|图)')
     _MARKDOWN_ANCHOR_RE = re.compile(r'<a id="((?:block-)?[^"]+)"></a>')
 
     def generate_draft_section(
@@ -777,45 +776,6 @@ class WriterDraftingTools(WriterToolBase):
             and str(item.get('target')) not in found_targets
         ]
         if missing:
-            paragraph = next(
-                (
-                    block for block in draft_block.iter_blocks()
-                    if block.type == 'paragraph' and block.content.strip()
-                ),
-                None,
-            )
-            if paragraph is None:
-                paragraph = next(
-                    (
-                        block for block in draft_block.iter_blocks()
-                        if block.content.strip() and block.type != 'heading'
-                    ),
-                    None,
-                )
-            if paragraph is not None:
-                if not paragraph.spans:
-                    paragraph.spans.append(WriterSpan(text=paragraph.content))
-                for target in missing:
-                    paragraph.spans.append(WriterSpan(
-                        text='',
-                        style={
-                            'link': {
-                                'type': 'internal_ref',
-                                'target_node_id': target,
-                            },
-                        },
-                    ))
-                paragraph.content = ''.join(
-                    span.text for span in paragraph.spans
-                )
-                found_targets.update(missing)
-
-        missing = [
-            str(item.get('target')) for item in references
-            if item.get('required', True)
-            and str(item.get('target')) not in found_targets
-        ]
-        if missing:
             raise ValueError(f'Missing required cross-references: {missing!r}.')
 
     @classmethod
@@ -871,20 +831,7 @@ class WriterDraftingTools(WriterToolBase):
                 return f'[](#block-{raw_target})'
 
             line = cls._MARKDOWN_INTERNAL_LINK_RE.sub(replace_link, line)
-            line = cls._CLEARED_LINK_MEASURE_RE.sub(r'\1', line)
             output.append(line)
-
-        missing_required = [
-            str(item.get('target')) for item in references
-            if item.get('required', True)
-            and str(item.get('target')) not in found_targets
-        ]
-        if missing_required:
-            output.append('')
-            output.append(
-                ' '.join(f'[](#block-{target})' for target in missing_required),
-            )
-            found_targets.update(missing_required)
 
         for item in references:
             target = str(item.get('target'))

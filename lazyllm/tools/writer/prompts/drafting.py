@@ -7,7 +7,7 @@ Requirements:
 - The section's actual prose lives in the block's children. Use paragraph blocks for prose.
 - A paragraph child usually represents one substantial paragraph or paragraph group.
 - The section instruction is a writing plan, not a list of visible headings.
-- Do not add visible heading numbers such as "1", "1.1", "一、", or "第 1 节".
+- Write headings without visible numbering; the system renders numbers.
 - Use expected_blocks to guide coverage and ordering, but do not copy them verbatim as headings.
 - Treat expected_blocks as priorities, not minimum paragraph counts. Combine or omit
   secondary cues when necessary to fit the section budget.
@@ -42,8 +42,9 @@ Requirements:
   If must_create=true, create one child WriterBlock with type="image",
   node_id=target, and content=caption.
   To reference a target, add an internal_ref span with target_node_id=target and text="".
-  Reference each planned target at most once, and use no references beyond this plan.
-  Do not write visible reference text such as "第 1 节" or "图 1".
+  Example: {{"text":"","style":{{"link":{{"type":"internal_ref","target_node_id":"sec-2"}}}}}}.
+  Include each required target exactly once, and use no references beyond this plan.
+  Leave internal reference display text empty; the system renders it.
   Do not invent target_node_id values outside this plan.
 - Emit WriterBlock fields in schema order. In particular, emit numbering and references before content.
 
@@ -76,7 +77,7 @@ Requirements:
 - section_instruction.meta.target_chars is the preferred prose length and
   section_instruction.meta.max_chars is a hard prose limit when present.
 - The length limit takes precedence over exhaustive source coverage or prose expansion.
-- Do not add visible heading numbers such as "1", "1.1", "一、", or "第 1 节".
+- Write headings without visible numbering; the system renders numbers.
 - Respect required_points, fact_constraints, style_constraints, and relation_constraints.
 - When section_instruction.meta.rewrite=true, treat meta.source_content as the authoritative
   source material for this section and meta.source_format as formatting guidance. Rewrite it
@@ -90,8 +91,8 @@ Requirements:
   Each item's "target" is the exact system key. When must_create=true, emit
   <a id="block-<target>"></a> immediately before the created image/table/code block.
   To reference a target, use [natural text](#block-<target>); the system will clear
-  the display text before saving. Reference each planned target at most once, and use no
-  references beyond this plan. Do not write visible numbers such as "第 1 节" or "图 1".
+  the display text before saving. Include each required target exactly once, and use no
+  references beyond this plan. Leave reference display text empty for the system to render.
   Do not invent target keys outside this plan.
 - Return substantial finished prose, not a summary, placeholder, or planning notes.
 

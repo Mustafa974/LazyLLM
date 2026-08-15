@@ -219,13 +219,13 @@ def compute_numbering(view: NumberingView) -> NumberingMap:
 def format_target_number(entry: NumberingEntry) -> str:
     if entry.kind == 'section':
         return '.'.join(str(part) for part in entry.number_parts)
-    return f'{_LABEL_BY_KIND[entry.kind]} {entry.number_parts[0]}'
+    return f'{_LABEL_BY_KIND[entry.kind]}{entry.number_parts[0]}'
 
 
 def format_reference(entry: NumberingEntry) -> str:
     number = format_target_number(entry)
     if entry.kind == 'section':
-        return f'第 {number} 节'
+        return f'第{number}章'
     return number
 
 
@@ -395,7 +395,7 @@ def dematerialize_markdown(markdown: str, base_numbering: NumberingMap | None = 
         if fence is not None:
             output.append(line)
             continue
-        if re.match(r'^(图|表|代码) \d+', line.strip()):
+        if re.match(r'^(图|表|代码)\d+', line.strip()):
             continue
         heading = _HEADING_RE.match(line)
         if heading:
@@ -423,7 +423,7 @@ def dematerialize_markdown(markdown: str, base_numbering: NumberingMap | None = 
                         ))
                     else:
                         line = re.sub(
-                            r'!\[(?:图|表|代码) \d+\s+([^\]]*)\]',
+                            r'!\[(?:图|表|代码)\d+\s+([^\]]*)\]',
                             r'![\1]',
                             line,
                         )

@@ -292,7 +292,7 @@ class WriterResourceTools(WriterToolBase):
         )
         warnings: List[str] = []
         if source_document is not None:
-            document, warnings = self._omit_unavailable_images(document, media_library)
+            self._validate_available_images(document, media_library)
             numbering = compute_numbering(build_numbering_view_from_ir(document))
             document = materialize_ir(document, numbering)
             document = materialize_feishu_links(document, document_id)
@@ -305,40 +305,30 @@ class WriterResourceTools(WriterToolBase):
         if document.title:
             self._update_document_title(fs, document_id, document.title, document.revision)
         if not native_blocks:
-            warnings.append('No publishable blocks remain after media filtering.')
+            warnings.append('Document has no publishable blocks.')
             return self._save_write_result(document_id, protocol, locator, 0, warnings)
-        write_blocks(document_id, native_blocks, number_headings=True)
+        write_blocks(document_id, native_blocks)
         return self._save_write_result(document_id, protocol, locator, len(native_blocks), warnings)
 
-    def _omit_unavailable_images(
-        self,
+    @staticmethod
+    def _validate_available_images(
         document: WriterDocument,
         media_assets: Optional[MediaAssetLibrary],
-    ) -> Tuple[WriterDocument, List[str]]:
-        warnings: List[str] = []
-
-        def copy_blocks(blocks):
-            copied = []
-            for block in blocks:
-                if block.type == 'image':
-                    references = [
-                        ref.get('id') for ref in block.references
-                        if ref.get('type') == 'media_asset' and ref.get('id')
-                    ]
-                    if len(references) != 1:
-                        warnings.append(f'Skipped image block {block.node_id!r}: invalid media reference.')
-                        continue
-                    asset_id = references[0]
-                    asset = media_assets.assets.get(asset_id) if media_assets else None
-                    if asset is None or not asset.local_path or not Path(asset.local_path).is_file():
-                        warnings.append(f'Skipped image block {block.node_id!r}: media is unavailable.')
-                        continue
-                copied_block = block.model_copy(deep=True)
-                copied_block.children = copy_blocks(copied_block.children)
-                copied.append(copied_block)
-            return copied
-
-        return document.model_copy(update={'blocks': copy_blocks(document.blocks)}), warnings
+    ) -> None:
+        for block in document.iter_blocks():
+            if block.type != 'image':
+                continue
+            references = [
+                ref.get('id') for ref in block.references
+                if ref.get('type') == 'media_asset' and ref.get('id')
+            ]
+            if len(references) != 1:
+                raise ValueError(
+                    f'Image block {block.node_id!r} requires exactly one media_asset reference.'
+                )
+            asset = media_assets.assets.get(references[0]) if media_assets else None
+            if asset is None or not asset.local_path or not Path(asset.local_path).is_file():
+                raise ValueError(f'Image block {block.node_id!r} media is unavailable.')
 
     def apply_patch_to_document(  # noqa: C901
         self,
