@@ -181,7 +181,7 @@ Requirements:
 - Create a visual only when the user explicitly requires it or it materially improves the section.
 - Each content_ref must contain only node_id for one top-level heading in the outline.
 - Use the most appropriate visual_type. preferred_strategy is optional; if omitted, the system
-  derives it from visual_type.
+  derives it from visual_type. Do not use image_generation for chart or table.
 - purpose must state what the visual communicates for its section.
 - Set required=true only when the user explicitly requires the visual.
 - Do not change the outline. Do not generate asset IDs, paths, URLs, captions, placeholders, or upload details.
@@ -205,7 +205,7 @@ Requirements:
 - Each content_ref must target exactly one H2 section from target_sections: use its exact
   heading_path and occurrence. Do not use node_id or document_root.
 - Use the most appropriate visual_type. preferred_strategy is optional; if omitted, the system
-  derives it from visual_type.
+  derives it from visual_type. Do not use image_generation for chart or table.
 - purpose must state what the visual communicates for its section.
 - Set required=true only when the user explicitly requires the visual.
 - Do not change the outline. Do not generate asset IDs, paths, URLs, captions, placeholders, or upload details.

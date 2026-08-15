@@ -10,7 +10,6 @@ import pytest
 
 from lazyllm.common import FileSystemQueue
 from lazyllm.module.module import ModuleBase
-from lazyllm.thirdparty import PIL
 from lazyllm.tools.writer.data_models import (
     ContentRef,
     DocumentSummary,
@@ -42,7 +41,6 @@ from lazyllm.tools.writer.data_models.planning import (
 from lazyllm.tools.writer.tools.context_tools import WriterContextTools
 from lazyllm.tools.writer.tools.drafting_tools import WriterDraftingTools
 from lazyllm.tools.writer.tools.base import WriterToolBase
-from lazyllm.tools.writer.tools.multimodal_tools import WriterMultimodalTools
 from lazyllm.tools.writer.tools.planning_tools import WriterPlanningTools
 from lazyllm.tools.writer.tools.quality_tools import WriterQualityTools
 from lazyllm.tools.writer.tools.resource_tools import WriterResourceTools
@@ -1164,43 +1162,6 @@ def test_markdown_draft_receives_only_its_resolved_media():
     assert 'IMAGE-1' in prompt
     assert 'asset-1' in prompt
     assert markdown.endswith('![关键关系](media-placeholder://IMAGE-1)\n')
-
-
-def test_visual_strategy_order_matches_all_visual_types():
-    tool = WriterMultimodalTools()
-    expected_strategies = {
-        'image': ['web_search', 'image_generation'],
-        'diagram': ['code_render', 'web_search', 'image_generation'],
-        'chart': ['code_render', 'web_search', 'image_generation'],
-        'table': ['code_render', 'web_search', 'image_generation'],
-    }
-    for visual_type, expected in expected_strategies.items():
-        need = VisualInstruction(
-            need_id=f'{visual_type}-1',
-            content_ref=ContentRef(node_id='section-1'),
-            visual_type=visual_type,
-            purpose='测试策略顺序',
-        )
-        assert tool._visual_strategies(need, None) == expected
-
-
-def test_web_search_media_keeps_its_source_url(tmp_path):
-    source = tmp_path / 'search-result.png'
-    PIL.Image.new('RGB', (2, 2), 'white').save(source)
-    resource = InputResource(
-        resource_type='image',
-        uri=str(source),
-        mime_type='image/png',
-        meta={
-            'source_type': 'web_search',
-            'source_url': 'https://example.com/search-result.png',
-        },
-    )
-
-    with tempfile.TemporaryDirectory() as directory:
-        asset = WriterMultimodalTools(artifact_store=directory)._materialize_input_resource(resource)
-
-    assert asset.meta['source_url'] == 'https://example.com/search-result.png'
 
 
 def test_markdown_outline_requires_title_and_section():

@@ -9,7 +9,7 @@ from lazyllm.module.module import ModuleExecutionError
 
 from .base import WriterToolBase
 from ..data_models.context import WritingContext
-from ..data_models.multimodal import MediaAssetLibrary, _VISUAL_STRATEGY_ORDER
+from ..data_models.multimodal import MediaAssetLibrary
 from ..data_models.revision import (
     GeneratedRevision,
     LocatedContent,
@@ -343,16 +343,6 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
             if missing:
                 raise ValueError(f'locate_result has references absent from document: {missing}.')
 
-            image_guidance = (
-                '  - Existing image blocks must not be updated or moved. Text blocks continue to\n'
-                '    support create, update, delete, and move.'
-                if isinstance(source_doc, WriterDocument)
-                else '  - In Markdown, an image line (a line beginning with `![` and containing a full\n'
-                     '    media-asset URL) is a complete unit: it can be deleted, or moved as one complete\n'
-                     '    line (content_ref = its source section, destination_ref = target section). Images\n'
-                     '    are never updated (no image editing). Identify the intended image line by caption\n'
-                     '    or document order when the request references "first"/"second"/a caption.'
-            )
             prompt = GENERATE_MODIFY_PLAN_PROMPT.format(
                 task_json=to_prompt_json(writing_task),
                 document_content=(
@@ -362,7 +352,6 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
                 ),
                 locate_result_json=to_prompt_json(located),
                 context_json=to_prompt_json(writing_context),
-                image_guidance=image_guidance,
             )
             modify_plan = self._call_llm_structured(prompt, ModifyPlan)
         else:
@@ -693,18 +682,18 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
             return blocks
         if len(blocks) != 1:
             raise ValueError(
-                f'visual create instruction {instruction.instruction_id!r} '
+                f'image create instruction {instruction.instruction_id!r} '
                 'requires exactly one block.'
             )
         asset_id = self._require_visual_asset(visual, media_assets)
         content = blocks[0].model_copy(deep=True)
         if content.type not in {None, 'image'}:
             raise ValueError(
-                f'visual create instruction {instruction.instruction_id!r} '
+                f'image create instruction {instruction.instruction_id!r} '
                 'must produce type="image".'
             )
         if content.children:
-            raise ValueError('visual create content must not contain child blocks.')
+            raise ValueError('image create content must not contain child blocks.')
         content.type = 'image'
         references = {'type': 'media_asset', 'id': asset_id}
         asset = media_assets.assets[asset_id]
@@ -1140,12 +1129,12 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
         if visual is not None:
             if instruction.modify_type != 'create':
                 raise ValueError('visual_instruction is only valid for create instructions.')
-            if visual.visual_type not in _VISUAL_STRATEGY_ORDER:
-                raise ValueError('revision visual_instruction has an unsupported visual_type.')
+            if visual.visual_type != 'image':
+                raise ValueError('revision visual_instruction.visual_type must be "image".')
             if not visual.purpose.strip():
                 raise ValueError('revision visual_instruction.purpose must not be empty.')
             if not visual.required:
-                raise ValueError('revision visual additions must be required.')
+                raise ValueError('revision image additions must be required.')
             if visual.need_id != instruction.instruction_id:
                 raise ValueError(
                     'visual_instruction.need_id must equal instruction_id.'
@@ -1154,10 +1143,9 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
                 raise ValueError(
                     'visual_instruction.content_ref must equal instruction.content_ref.'
                 )
-            if visual.preferred_strategy is not None \
-                    and visual.preferred_strategy not in _VISUAL_STRATEGY_ORDER[visual.visual_type]:
+            if visual.preferred_strategy not in {None, 'image_generation'}:
                 raise ValueError(
-                    'revision visual preferred_strategy is not supported by visual_type.'
+                    'revision image preferred_strategy must be null or image_generation.'
                 )
 
         if document is None or instruction.modify_type not in {'update', 'move'}:
