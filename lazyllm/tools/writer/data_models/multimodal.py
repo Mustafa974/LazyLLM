@@ -8,8 +8,8 @@ from .writer_ir import ContentRef
 _VISUAL_STRATEGY_ORDER: Dict[str, List[str]] = {
     'image': ['web_search', 'image_generation'],
     'diagram': ['code_render', 'web_search', 'image_generation'],
-    'chart': ['code_render'],
-    'table': ['code_render'],
+    'chart': ['code_render', 'image_generation'],
+    'table': ['code_render', 'image_generation'],
 }
 
 

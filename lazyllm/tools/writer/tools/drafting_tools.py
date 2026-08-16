@@ -143,8 +143,14 @@ class WriterDraftingTools(WriterToolBase):
                 WriterBlock,
                 stream_output={'_stream_sink': sink},
             ),
-            normalize=lambda block: self._normalize_draft_block(block, instruction),
-            finalize=lambda block: self._save_ir_draft_section(block, result_extra, media_assets),
+            normalize=lambda block: self._normalize_draft_block(
+                block, instruction, allow_deferred_create=True,
+            ),
+            finalize=lambda block: self._save_ir_draft_section(
+                self._attach_section_media(block, instruction, visual_plan, media_assets),
+                result_extra,
+                media_assets,
+            ),
             instruction=instruction,
             idle_timeout=self._draft_stream_idle_timeout(idle_timeout),
         )
@@ -168,7 +174,12 @@ class WriterDraftingTools(WriterToolBase):
             media_assets,
         )
         block = self._normalize_draft_block(
-            self._call_llm_structured(prompt, WriterBlock),
+            self._attach_section_media(
+                self._call_llm_structured(prompt, WriterBlock),
+                instruction,
+                visual_plan,
+                media_assets,
+            ),
             instruction,
         )
         block = self._condense_ir_section_if_needed(block, instruction)
@@ -262,6 +273,100 @@ class WriterDraftingTools(WriterToolBase):
         if self._ir_prose_chars(condensed) > max_chars:
             raise ValueError(f'Condensed draft section still exceeds max_chars={max_chars}.')
         return condensed
+
+    def _attach_section_media(
+        self,
+        draft_block: WriterBlock,
+        instruction: SectionInstruction,
+        visual_plan: Any,
+        media_assets: Any,
+    ) -> WriterBlock:
+        resolved_plan = self._unified_optional_model(visual_plan, VisualPlan) or VisualPlan()
+        library = self._unified_optional_model(media_assets, MediaAssetLibrary)
+        if library is None:
+            return draft_block
+        section_id = instruction.content_ref.node_id
+        needs = [
+            need for need in resolved_plan.instructions
+            if need.content_ref.node_id == section_id and need.required
+        ]
+        targets = [
+            str(item.get('target'))
+            for item in instruction.meta.get('cross_references') or []
+            if item.get('must_create') and item.get('kind') == 'image' and item.get('target')
+        ]
+        block_by_id = {block.node_id: block for block in draft_block.iter_blocks()}
+        for target, need in zip(targets, needs):
+            asset_ids = [
+                asset_id for asset_id in library.visual_need_asset_ids.get(need.need_id, [])
+                if asset_id in library.assets
+            ]
+            if len(asset_ids) != 1:
+                continue
+            image = block_by_id.get(target)
+            if image is None or image.type != 'image':
+                continue
+            if any(
+                reference.get('type') == 'media_asset' and reference.get('id')
+                for reference in image.references or []
+            ):
+                continue
+            image.references = [{'type': 'media_asset', 'id': asset_ids[0]}]
+        for item in instruction.meta.get('cross_references') or []:
+            if not item.get('must_create') or item.get('kind') != 'image':
+                continue
+            target = str(item.get('target'))
+            if block_by_id.get(target) is not None:
+                continue
+            if target not in targets:
+                continue
+            need = needs[targets.index(target)]
+            asset_ids = [
+                asset_id for asset_id in library.visual_need_asset_ids.get(need.need_id, [])
+                if asset_id in library.assets
+            ]
+            if len(asset_ids) != 1:
+                continue
+            image = WriterBlock(
+                node_id=target,
+                type='image',
+                content=strip_caption_numbering(str(item.get('caption') or '图')),
+                stage='draft',
+                references=[{'type': 'media_asset', 'id': asset_ids[0]}],
+            )
+            draft_block.children.append(image)
+            block_by_id[target] = image
+        referenced = {
+            span.style['link']['target_node_id']
+            for block in draft_block.iter_blocks()
+            for span in block.spans
+            if isinstance(span.style.get('link'), dict)
+            and span.style['link'].get('type') == 'internal_ref'
+            and span.style['link'].get('target_node_id')
+        }
+        for item in instruction.meta.get('cross_references') or []:
+            if not item.get('must_create') or item.get('kind') != 'image':
+                continue
+            target = str(item.get('target'))
+            if target in referenced:
+                continue
+            paragraph = next(
+                (
+                    block for block in draft_block.iter_blocks()
+                    if block.type == 'paragraph' and block.content.strip()
+                ),
+                None,
+            )
+            if paragraph is None:
+                continue
+            if not paragraph.spans:
+                paragraph.spans.append(WriterSpan(text=paragraph.content))
+            paragraph.spans.append(WriterSpan(
+                text='',
+                style={'link': {'type': 'internal_ref', 'target_node_id': target}},
+            ))
+            paragraph.content = ''.join(span.text for span in paragraph.spans)
+        return draft_block
 
     def _condense_markdown_section_if_needed(
         self,
@@ -692,7 +797,7 @@ class WriterDraftingTools(WriterToolBase):
         top_sections = [section for section in sections if section[0] <= 2]
         if len(top_sections) != 1 or top_sections[0][0] != 2:
             raise ValueError('Markdown draft section must contain exactly one H2 root heading.')
-        if top_sections[0][1][-1] != instruction.content_ref.heading_path[-1]:
+        if top_sections[0][1][-1] != strip_heading_numbering(instruction.content_ref.heading_path[-1]):
             raise ValueError('Markdown draft section heading does not match its content_ref.')
 
     @staticmethod
@@ -709,6 +814,8 @@ class WriterDraftingTools(WriterToolBase):
         self,
         draft_block: WriterBlock,
         instruction: SectionInstruction,
+        *,
+        allow_deferred_create: bool = False,
     ) -> WriterBlock:
         section_id = instruction.content_ref.node_id
         if not section_id:
@@ -725,13 +832,17 @@ class WriterDraftingTools(WriterToolBase):
             elif block.type == 'image':
                 block.content = strip_caption_numbering(block.content)
         draft_block.references = [dict(reference) for reference in instruction.references]
-        self._normalize_ir_cross_references(draft_block, instruction)
+        self._normalize_ir_cross_references(
+            draft_block, instruction, allow_deferred_create=allow_deferred_create,
+        )
         return draft_block
 
     @staticmethod
     def _normalize_ir_cross_references(
         draft_block: WriterBlock,
         instruction: SectionInstruction,
+        *,
+        allow_deferred_create: bool = False,
     ) -> None:
         references = [
             item for item in instruction.meta.get('cross_references') or []
@@ -745,6 +856,8 @@ class WriterDraftingTools(WriterToolBase):
             target = str(item.get('target'))
             target_block = block_by_id.get(target)
             if target_block is None or target_block.type != str(item.get('kind')):
+                if allow_deferred_create:
+                    continue
                 raise ValueError(f'Missing created cross-reference target {target!r}.')
             if target_block.type == 'image':
                 media_ids = [
@@ -752,9 +865,10 @@ class WriterDraftingTools(WriterToolBase):
                     if reference.get('type') == 'media_asset' and reference.get('id')
                 ]
                 if len(media_ids) != 1:
-                    raise ValueError(
-                        f'Created image {target!r} requires exactly one media_asset reference.'
-                    )
+                    if not allow_deferred_create:
+                        raise ValueError(
+                            f'Created image {target!r} requires exactly one media_asset reference.'
+                        )
 
         found_targets: set[str] = set()
         for block in draft_block.iter_blocks():
@@ -774,6 +888,11 @@ class WriterDraftingTools(WriterToolBase):
             str(item.get('target')) for item in references
             if item.get('required', True)
             and str(item.get('target')) not in found_targets
+            and not (
+                allow_deferred_create
+                and item.get('must_create')
+                and item.get('kind') == 'image'
+            )
         ]
         if missing:
             raise ValueError(f'Missing required cross-references: {missing!r}.')

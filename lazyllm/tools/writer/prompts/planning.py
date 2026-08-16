@@ -224,16 +224,20 @@ Requirements:
 - For a normal-length section, expected_blocks should usually contain 3 to 6 planned content
   blocks. Use fewer and merge coverage cues when the total document budget is short.
 - expected_blocks are planning labels for coverage and ordering, not visible headings that must appear in final text.
-- A generic request for cross-references calls for the strongest dependency in the document.
-   Add another section reference only when this section depends on a specific definition,
-   result, or method in the target section. Ordinary sequential continuity stays in
-   relation_constraints.
+- Plan a section cross-reference when this section's text will point readers to
+   another section for a specific definition, result, or method - for example a
+   conclusion citing the experiments it summarizes. This is expected when the writing
+   task asks for cross-references. Background continuity readers are assumed to know
+   (such as narrative chapters building on earlier events) belongs in relation_constraints.
    For Writer IR, target_ref is {{"node_id": "..."}} copied from the outline.
    For Markdown, target_ref is the target section's {{"heading_path": [...], "occurrence": 1}}.
    Its guidance names the information the reader needs from that target.
 - When this section must create and reference an image, add an object to
    meta.cross_references with must_create=true, kind="image", a concrete caption,
-   required=true, and concise guidance. Do not invent the final target ID; the system assigns it.
+   required=true, and concise guidance. Give it a stable placeholder_id such as
+   figure-1 when other sections may reference it; the system assigns the final target ID.
+- To reference an image created in another section, use
+   target_ref: {{"node_id": "<that image's placeholder_id>"}} with kind="image".
 - Describe references naturally; the system renders their numbers.
 - Do not invent facts that conflict with writing context.
 
