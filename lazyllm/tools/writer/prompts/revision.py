@@ -71,6 +71,9 @@ Plan semantics:
   including paragraph count, list-item count, heading level, and ordering. Render distinct
   Markdown paragraphs with blank lines and render lists/headings with their Markdown syntax;
   do not record required structure only in meta.
+- When task.query requires inserted or updated content to reference an existing section or
+  image, keep that requirement in instruction; the content writer emits an internal_ref span
+  for the existing target.
 - For an image create, describe one image block and its final caption in instruction;
   do not invent media_asset IDs, file paths, URLs, or provider identifiers.
 - instruction_id is unique, and instructions follow execution order.
@@ -157,7 +160,13 @@ Output semantics:
   the final caption. Do not invent references or asset IDs; the system adds the single
   resolved media_asset reference after generation.
 - Preserve existing internal_ref spans in updated text blocks. Do not invent new
-  target_node_id values; the structural revision system assigns created targets.
+  target_node_id values; to reference an existing heading or image block, copy its exact
+  node_id from the visible document into an internal_ref span with empty text. The system
+  renders the reference and assigns created targets.
+- A paragraph that references an existing block uses one empty internal_ref span between
+  its text spans. content equals the concatenation of the text spans; an internal_ref
+  span keeps text empty, so do not include the target title in content. The system inserts
+  the rendered reference. Example: spans=[{{"text":"详见"}},{{"text":"","style":{{"link":{{"type":"internal_ref","target_node_id":"sec-related"}}}}}},{{"text":"中的定义。"}}] with content="详见中的定义。" renders as "详见第2章中的定义。".
 
 Visible document:
 {document_json}

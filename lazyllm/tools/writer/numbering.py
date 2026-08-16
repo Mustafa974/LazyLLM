@@ -236,6 +236,8 @@ def materialize_ir(document: WriterDocument, numbering: NumberingMap) -> WriterD
         if entry is not None and block.type in {'heading', 'image', 'table', 'code'}:
             prefix = format_target_number(entry)
             block.content = f'{prefix} {block.content}'.strip()
+            if block.spans and block.spans[0].text:
+                block.spans[0].text = f'{prefix} {block.spans[0].text}'.strip()
         for span in block.spans:
             link = span.style.get('link')
             if (
@@ -367,6 +369,8 @@ def dematerialize_ir(
             prefix = f'{format_target_number(entry)} '
             if block.content.startswith(prefix):
                 block.content = block.content[len(prefix):]
+            if block.spans and block.spans[0].text.startswith(prefix):
+                block.spans[0].text = block.spans[0].text[len(prefix):]
         for span in block.spans:
             link = span.style.get('link')
             if isinstance(link, dict) and link.get('type') == 'internal_ref':

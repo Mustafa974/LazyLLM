@@ -13,16 +13,18 @@ from ..data_models.resource import MaterialStyle, ResourceProfile
 from ..data_models.multimodal import MediaAssetLibrary
 from ..data_models.revision import PatchHunk, PatchResult, PatchSet
 from ..data_models.task import InputResource, TargetDocument, WritingTask
-from ..data_models.writer_ir import WriterDocument, WriterStage
+from ..data_models.writer_ir import WriterBlock, WriterDocument, WriterStage
 from ..numbering import (
     build_numbering_view_from_ir,
     compute_numbering,
+    format_target_number,
     format_reference,
     materialize_ir,
     materialize_feishu_links,
 )
 from ..prompts.profile_resources import RESOURCE_PROFILE_PROMPT
-from ..utils import parse_document_markdown
+from ..tools.revision_tools import apply_patch_to_ir
+from ..utils import parse_document_markdown, strip_heading_numbering
 
 _WRITER_STAGE_ADAPTER = TypeAdapter(WriterStage)
 
@@ -352,10 +354,12 @@ class WriterResourceTools(WriterToolBase):
         target = self._unified_optional_model(target_document, TargetDocument) or TargetDocument()
         protocol, real_path, fs, adapter, locator, document_id = \
             self._resolve_document_target(target, source_document=source)
-        numbering = compute_numbering(build_numbering_view_from_ir(source))
+        source_numbering = compute_numbering(build_numbering_view_from_ir(source))
+        revised_document, _ = apply_patch_to_ir(source, patch, media_assets=media_library)
+        final_numbering = compute_numbering(build_numbering_view_from_ir(revised_document))
         block_id_by_node_id = {
             block.node_id: block.provider_binding.get('block_id')
-            for block in source.iter_blocks()
+            for block in revised_document.iter_blocks()
         }
 
         def refresh(previous: WriterDocument, result: Any = None, **merge_kwargs) -> WriterDocument:
@@ -379,7 +383,7 @@ class WriterResourceTools(WriterToolBase):
             hunk = self._materialize_hunk_feishu_links(
                 hunk,
                 block_id_by_node_id=block_id_by_node_id,
-                numbering=numbering,
+                numbering=final_numbering,
                 document_id=document_id,
             )
             operation = adapter.patch_to_operation(
@@ -424,6 +428,47 @@ class WriterResourceTools(WriterToolBase):
         elif not patch.hunks:
             persisted_document = refresh(persisted_document)
 
+        for heading in revised_document.iter_blocks():
+            if heading.type != 'heading':
+                continue
+            entry = final_numbering.get(heading.node_id)
+            if entry is None:
+                continue
+            expected = (
+                f'{format_target_number(entry)} '
+                f'{strip_heading_numbering(heading.content)}'
+            ).strip()
+            current = persisted_document.block_by_id(heading.node_id)
+            if current is None or current.content == expected:
+                continue
+            sync_hunk = PatchHunk(
+                hunk_id=f'heading-sync-{heading.node_id}',
+                target_node_id=heading.node_id,
+                modify_type='update',
+                block=WriterBlock(
+                    node_id=heading.node_id,
+                    type='heading',
+                    content=expected,
+                    stage='draft',
+                    numbering={'level': current.numbering.get('level', 1)},
+                ),
+            )
+            sync_hunk = self._materialize_hunk_feishu_links(
+                sync_hunk,
+                block_id_by_node_id=block_id_by_node_id,
+                numbering=final_numbering,
+                document_id=document_id,
+            )
+            operation = adapter.patch_to_operation(
+                sync_hunk, persisted_document, media_assets=media_library)
+            operation_result = self._execute_native_operation(
+                fs, document_id, operation, persisted_document.revision)
+            applied_hunks.append(sync_hunk.hunk_id)
+            persisted_document = refresh(
+                persisted_document.model_copy(update={'title': expected_title}),
+                operation_result, patch=sync_hunk, operation=operation,
+            )
+
         patch_result = PatchResult(
             patch_id=patch.patch_id,
             success=True,
@@ -465,23 +510,32 @@ class WriterResourceTools(WriterToolBase):
             return hunk
         hunk = hunk.model_copy(deep=True)
         block = hunk.block
-        for span in block.spans:
-            link = span.style.get('link')
-            if not isinstance(link, dict) or link.get('type') != 'internal_ref':
-                continue
-            target_id = link.get('target_node_id')
-            target_block_id = block_id_by_node_id.get(target_id)
-            if not target_block_id:
-                span.text = ''
-                continue
-            span.style['link'] = {
-                'url': f'https://feishu.cn/docx/{document_id}#{target_block_id}',
-            }
-            entry = numbering.get(target_id)
-            if entry is not None:
-                span.text = format_reference(entry)
-        if block.spans:
-            block.content = ''.join(span.text for span in block.spans)
+        for item in block.iter_blocks():
+            if item.type == 'heading':
+                entry = numbering.get(item.node_id)
+                if entry is not None:
+                    item.content = (
+                        f'{format_target_number(entry)} '
+                        f'{strip_heading_numbering(item.content)}'
+                    ).strip()
+                    item.spans = []
+            for span in item.spans:
+                link = span.style.get('link')
+                if not isinstance(link, dict) or link.get('type') != 'internal_ref':
+                    continue
+                target_id = link.get('target_node_id')
+                target_block_id = block_id_by_node_id.get(target_id)
+                if not target_block_id:
+                    span.text = ''
+                    continue
+                span.style['link'] = {
+                    'url': f'https://feishu.cn/docx/{document_id}#{target_block_id}',
+                }
+                entry = numbering.get(target_id)
+                if entry is not None:
+                    span.text = format_reference(entry)
+            if item.spans:
+                item.content = ''.join(span.text for span in item.spans)
         return hunk
 
     @staticmethod

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote
 
 from ..utils.feishu_docx import DOCX_BLOCK_TYPE_FIELDS, prepare_docx_descendants
+from ..utils import strip_caption_numbering, strip_heading_numbering
 from ..data_models.revision import PatchHunk
 from ..data_models.multimodal import MediaAssetLibrary
 from ..data_models.writer_ir import (
@@ -563,10 +564,14 @@ class FeishuWriterAdapter(WriterAdapterBase):
         if block_type == 27:
             caption = ((raw.get('image') or {}).get('caption') or {}).get('content')
             content = caption if isinstance(caption, str) else ''
+            content = strip_caption_numbering(content)
             spans = []
         numbering: Dict[str, Any] = {}
         if isinstance(block_type, int) and 3 <= block_type <= 11:
             numbering['level'] = block_type - 2
+            content = strip_heading_numbering(content)
+            if spans and spans[0].text:
+                spans[0].text = strip_heading_numbering(spans[0].text)
         elif block_type in (12, 13):
             numbering['ordered'] = block_type == 13
 
