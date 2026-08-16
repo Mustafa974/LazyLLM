@@ -142,7 +142,6 @@ def test_stream_markdown_draft_is_isolated_and_returns_tool_result():
             section_instruction=instruction,
             context=context,
             visual_plan=VisualPlan(),
-            media_assets=MediaAssetLibrary(library_id='media-library-stream'),
             idle_timeout=1,
         ) as stream:
             markdown = ''.join(stream)
@@ -1125,25 +1124,22 @@ def test_generate_markdown_visual_plan_assigns_section_placeholders():
     assert need.preferred_strategy == 'code_render'
 
 
-def test_markdown_draft_receives_only_its_resolved_media():
+def test_markdown_draft_receives_its_section_visual_needs():
     task, instruction, context = _markdown_draft_inputs()
-    plan = VisualPlan(instructions=[VisualInstruction(
-        need_id='IMAGE-1',
-        content_ref=instruction.content_ref,
-        visual_type='image',
-        purpose='说明方案的关键关系',
-    )])
-    library = MediaAssetLibrary(
-        library_id='media-library-1',
-        assets={'asset-1': MediaAsset(
-            media_asset_id='asset-1',
-            asset_type='image',
-            source_type='web_search',
-            caption='关键关系示意图',
-            summary='展示关键关系的示意图',
-        )},
-        visual_need_asset_ids={'IMAGE-1': ['asset-1']},
-    )
+    plan = VisualPlan(instructions=[
+        VisualInstruction(
+            need_id='IMAGE-1',
+            content_ref=instruction.content_ref,
+            visual_type='image',
+            purpose='说明方案的关键关系',
+        ),
+        VisualInstruction(
+            need_id='IMAGE-2',
+            content_ref=ContentRef(heading_path=['测试文档', '第二章']),
+            visual_type='diagram',
+            purpose='说明第二章的关系',
+        ),
+    ])
 
     with tempfile.TemporaryDirectory() as directory:
         tool = WriterDraftingTools(artifact_store=directory)
@@ -1153,14 +1149,18 @@ def test_markdown_draft_receives_only_its_resolved_media():
             return_value='正文。\n\n![关键关系](media-placeholder://IMAGE-1)',
         ) as mocked:
             result = tool.generate_draft_section(
-                task, instruction, context, visual_plan=plan, media_assets=library,
+                task, instruction, context, visual_plan=plan,
             )
         markdown = Path(result['artifact_path']).read_text(encoding='utf-8')
 
     prompt = mocked.call_args.args[0]
     assert 'media-placeholder://<need_id>' in prompt
     assert 'IMAGE-1' in prompt
-    assert 'asset-1' in prompt
+    assert '说明方案的关键关系' in prompt
+    assert '"required": true' in prompt
+    assert 'IMAGE-2' not in prompt
+    assert 'asset-1' not in prompt
+    assert 'Resolved section media:' not in prompt
     assert markdown.endswith('![关键关系](media-placeholder://IMAGE-1)\n')
 
 
