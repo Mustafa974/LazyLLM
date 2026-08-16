@@ -443,14 +443,13 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
         if isinstance(source, WriterDocument):
             return self.generate_patch_set(
                 source, modify_plan, context, media_assets=media_assets)
-        return self.generate_string_replace_set(source, modify_plan, context, media_assets=media_assets)
+        return self.generate_string_replace_set(source, modify_plan, context)
 
     def generate_string_replace_set(
         self,
         document: Any,
         modify_plan: Any,
         context: Any,
-        media_assets: Any = None,
     ) -> dict:
         source = self._unified_document(document)
         if isinstance(source, WriterDocument):
@@ -463,12 +462,10 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
             meta={'source': 'generate_string_replace_set'},
         )
         if plan.instructions or plan.title_instruction:
-            resolved_media = self._revision_resolved_media(plan, media_assets)
             prompt = GENERATE_STRING_REPLACE_SET_PROMPT.format(
                 document_content=source,
                 modify_plan_json=to_prompt_json(plan),
                 context_json=to_prompt_json(writing_context),
-                resolved_media_json=to_prompt_json(resolved_media),
             )
             replace_set = self._call_llm_structured(prompt, StringReplaceSet)
             replace_set.replace_set_id = (
@@ -488,49 +485,6 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
             artifact_meta={'context_id': writing_context.context_id},
             artifact_filenames={'string_replace_set': 'string_replace_set.json'},
         ).model_dump()
-
-    def _revision_resolved_media(
-        self,
-        plan: ModifyPlan,
-        media_assets: Any,
-    ) -> Dict[str, Any]:
-        needs = [
-            instruction.visual_instruction
-            for instruction in plan.instructions
-            if instruction.visual_instruction is not None
-        ]
-        if not needs or media_assets is None:
-            return {}
-        library = self._unified_model(media_assets, MediaAssetLibrary)
-        return {
-            'visual_needs': [
-                {
-                    'need_id': need.need_id,
-                    'visual_type': need.visual_type,
-                    'purpose': need.purpose,
-                    'required': need.required,
-                }
-                for need in needs
-            ],
-            'assets': [
-                {
-                    'media_asset_id': asset.media_asset_id,
-                    'asset_type': asset.asset_type,
-                    'caption': asset.caption,
-                    'summary': asset.summary,
-                    'uri': asset.uri,
-                    'local_path': asset.local_path,
-                }
-                for need in needs
-                for asset_id in library.visual_need_asset_ids.get(need.need_id, [])
-                for asset in [library.assets.get(asset_id)]
-                if asset is not None
-            ],
-            'visual_need_asset_ids': {
-                need.need_id: library.visual_need_asset_ids.get(need.need_id, [])
-                for need in needs
-            },
-        }
 
     def _validate_string_replace_images(
         self,

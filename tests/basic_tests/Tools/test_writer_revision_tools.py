@@ -565,7 +565,7 @@ def test_generate_modify_plan_supports_markdown_content_ref():
     assert modified_plan.instructions[0].content_ref == content_ref
 
 
-def test_generate_markdown_replace_set_receives_resolved_image_media(tmp_path):
+def test_generate_markdown_replace_set_uses_modify_plan_image_need():
     content_ref = ContentRef(heading_path=['测试文档', '第一章'])
     instruction = ModifyInstruction(
         instruction_id='IMAGE-1',
@@ -586,7 +586,6 @@ def test_generate_markdown_replace_set_receives_resolved_image_media(tmp_path):
         old_string='原始正文。',
         new_string='原始正文。\n\n![关键关系](media-placeholder://IMAGE-1)',
     )])
-    library = _image_library(tmp_path, need_id='IMAGE-1')
     markdown = '# 测试文档\n\n## 第一章\n\n原始正文。\n'
 
     with tempfile.TemporaryDirectory() as directory:
@@ -596,14 +595,14 @@ def test_generate_markdown_replace_set_receives_resolved_image_media(tmp_path):
                 markdown,
                 plan,
                 WritingContext(context_id='ctx-md-image'),
-                media_assets=library,
             )
         generated = load_artifact_json(output['artifact_path'], StringReplaceSet)
 
     prompt = mocked.call_args.args[0]
     assert 'media-placeholder://<need_id>' in prompt
     assert 'IMAGE-1' in prompt
-    assert 'asset-image-1' in prompt
+    assert 'asset-image-1' not in prompt
+    assert 'Resolved section media:' not in prompt
     assert generated.replacements[0].new_string.endswith('media-placeholder://IMAGE-1)')
 
 
