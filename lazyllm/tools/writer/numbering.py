@@ -56,6 +56,8 @@ _HEADING_RE = re.compile(r'^(#{2,6})\s+(.+?)\s*$')
 _IMAGE_RE = re.compile(r'!\[([^\]]*)\]\([^)]*\)')
 _INTERNAL_LINK_RE = re.compile(r'\[([^\]]*)\]\(#(block-[^)]+)\)')
 _CODE_FENCE_RE = re.compile(r'^\s*(```+|~~~+)(.*)$')
+_HEADING_NUMBER_PREFIX_RE = re.compile(r'^\d+(?:\.\d+)*\s+')
+_FLOAT_NUMBER_PREFIX_RE = re.compile(r'^(图|表|代码)\d+(?:\.\d+)*\s+')
 
 
 def encode_anchor_id(node_id: str) -> str:
@@ -364,13 +366,25 @@ def dematerialize_ir(
 ) -> WriterDocument:
     result = document.model_copy(deep=True)
     for block in _iter_blocks(result.blocks):
+        stripped = False
         entry = base_numbering.get(block.node_id)
         if entry is not None and block.type in {'heading', 'image', 'table', 'code'}:
             prefix = f'{format_target_number(entry)} '
             if block.content.startswith(prefix):
                 block.content = block.content[len(prefix):]
+                stripped = True
             if block.spans and block.spans[0].text.startswith(prefix):
                 block.spans[0].text = block.spans[0].text[len(prefix):]
+                stripped = True
+        if not stripped and block.type in {'heading', 'image', 'table', 'code'}:
+            prefix_re = _HEADING_NUMBER_PREFIX_RE if block.type == 'heading' else _FLOAT_NUMBER_PREFIX_RE
+            match = prefix_re.match(block.content)
+            if match:
+                block.content = block.content[match.end():]
+            if block.spans and block.spans[0].text:
+                match = prefix_re.match(block.spans[0].text)
+                if match:
+                    block.spans[0].text = block.spans[0].text[match.end():]
         for span in block.spans:
             link = span.style.get('link')
             if isinstance(link, dict) and link.get('type') == 'internal_ref':
