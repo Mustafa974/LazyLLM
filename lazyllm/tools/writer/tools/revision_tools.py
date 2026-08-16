@@ -555,11 +555,18 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
                 continue
             if not replacement.content_ref.heading_path:
                 raise ValueError('Markdown content_ref requires heading_path or document_root.')
-            start, end = self._markdown_section_range(source, replacement.content_ref)
-            if replacement.old_string not in source[start:end]:
-                raise ValueError(
-                    f'Image old_string is absent in section for {replacement.replacement_id!r}.'
-                )
+            try:
+                start, end = self._markdown_section_range(source, replacement.content_ref)
+                if replacement.old_string in source[start:end]:
+                    continue
+            except ValueError:
+                pass
+            if source.count(replacement.old_string) == 1:
+                replacement.content_ref = ContentRef(document_root=True)
+                continue
+            raise ValueError(
+                f'Image old_string is absent in section for {replacement.replacement_id!r}.'
+            )
 
     def _compile_generated_revision(
         self,
