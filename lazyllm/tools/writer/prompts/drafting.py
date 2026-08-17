@@ -88,20 +88,15 @@ Requirements:
 - Use ordinary Markdown paragraphs, lists, quotes, fenced code, tables, images, and
   subheadings only when they help the requested content.
 - Use section_instruction.meta.cross_references as the authoritative cross-reference plan.
-  Each item's "target" is the exact system key. When must_create=true, emit
-  <a id="block-<target>"></a> immediately before the created image/table/code block.
-  To reference a target, use [natural text](#block-<target>); the system will clear
-  the display text before saving. Include each required target exactly once, and use no
-  references beyond this plan. Leave reference display text empty for the system to render.
-  Do not invent target keys outside this plan.
+  Each item's "target" is the exact system key. For a required target, emit exactly
+  [](#block-<target>) once in natural prose. Do not invent target keys outside this plan.
 - Return substantial finished prose, not a summary, placeholder, or planning notes.
 - section_visual_needs lists the visual needs planned for this section. It is independent
   of whether media resolution succeeds. When a required visual need is listed, place its
   image at the most appropriate reading position using exactly:
   ![short caption](media-placeholder://<need_id>).
-  This is the only permitted image syntax: never use Obsidian/wiki syntax such as
-  ![[...]], a local filename/path, a raw URL, or extra brackets.
-  Use only the need_id values listed in section_visual_needs; never invent or modify an id.
+  Use only the need_id bound to a must_create cross-reference. Emit each planned image
+  exactly once; the system inserts its numbering anchor.
 - Do not output image markup for anything outside this section's section_visual_needs list.
 
 Writing task:

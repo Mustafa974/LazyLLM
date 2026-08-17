@@ -40,6 +40,9 @@ class WriterDraftingTools(WriterToolBase):
 
     _MARKDOWN_INTERNAL_LINK_RE = re.compile(r'\[([^\]]*)\]\(#((?:block-)?[^)]+)\)')
     _MARKDOWN_ANCHOR_RE = re.compile(r'<a id="((?:block-)?[^"]+)"></a>')
+    _MARKDOWN_MEDIA_PLACEHOLDER_RE = re.compile(
+        r'!\[[^\]]*\]\(media-placeholder://([A-Za-z0-9_-]+)\)'
+    )
 
     def generate_draft_section(
         self, task: Any, section_instruction: Any,
@@ -932,6 +935,12 @@ class WriterDraftingTools(WriterToolBase):
         allowed_targets = {str(item.get('target')) for item in references}
         found_targets: set[str] = set()
         found_anchors: set[str] = set()
+        created_by_need = {
+            str(item.get('need_id')): item
+            for item in references
+            if item.get('must_create')
+        }
+        media_lines: Dict[str, int] = {}
         output: List[str] = []
         fence: str | None = None
         for line in body.splitlines():
@@ -957,6 +966,12 @@ class WriterDraftingTools(WriterToolBase):
                 elif raw_target in allowed_targets:
                     anchors.append(raw_target)
             found_anchors.update(f'block-{target}' for target in anchors)
+            for need_id in cls._MARKDOWN_MEDIA_PLACEHOLDER_RE.findall(line):
+                if need_id in media_lines:
+                    raise ValueError(f'Duplicate media placeholder {need_id!r}.')
+                if need_id not in created_by_need:
+                    raise ValueError(f'Unplanned media placeholder {need_id!r}.')
+                media_lines[need_id] = len(output)
 
             def replace_link(match: re.Match[str]) -> str:
                 raw_target = match.group(2)
@@ -976,8 +991,29 @@ class WriterDraftingTools(WriterToolBase):
 
         for item in references:
             target = str(item.get('target'))
-            if item.get('must_create') and f'block-{target}' not in found_anchors:
-                raise ValueError(f'Missing created cross-reference anchor {target!r}.')
+            if item.get('must_create'):
+                need_id = str(item.get('need_id') or '')
+                if not need_id:
+                    raise ValueError(f'Created image cross-reference {target!r} lacks need_id.')
+                if need_id not in media_lines:
+                    if item.get('required', True):
+                        raise ValueError(f'Missing planned media placeholder {need_id!r}.')
+                    continue
+                if f'block-{target}' not in found_anchors:
+                    pattern = re.compile(
+                        r'!\[[^\]]*\]\(media-placeholder://'
+                        + re.escape(need_id) + r'\)'
+                    )
+                    media = pattern.search(output[media_lines[need_id]])
+                    if media is None:
+                        raise ValueError(f'Invalid media placeholder {need_id!r}.')
+                    start = media.start()
+                    output[media_lines[need_id]] = (
+                        output[media_lines[need_id]][:start]
+                        + f'<a id="block-{target}"></a>'
+                        + output[media_lines[need_id]][start:]
+                    )
+                    found_anchors.add(f'block-{target}')
             if item.get('required', True) and target not in found_targets:
                 raise ValueError(f'Missing required cross-reference {target!r}.')
         return '\n'.join(output).strip()

@@ -39,7 +39,7 @@ class VisualInstruction(BaseModel):
     preferred_strategy: Literal[
         'web_search', 'kb_search', 'image_generation', 'code_render'
     ] | None = None
-    required: bool = True
+    required: bool = False
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 

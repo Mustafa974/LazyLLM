@@ -327,6 +327,7 @@ class WriterPlanningTools(WriterToolBase):
                 writing_context,
                 execution_data,
                 writing_task,
+                writing_visual_plan,
             )
             outline_id = instruction_list.outline_id
 
@@ -566,6 +567,7 @@ class WriterPlanningTools(WriterToolBase):
         context: WritingContext,
         execution_results: Any,
         task: WritingTask | None,
+        visual_plan: VisualPlan,
     ) -> SectionInstructionList:
         target_by_ref = {
             (tuple(heading_path), occurrence): (level, heading_path)
@@ -593,11 +595,9 @@ class WriterPlanningTools(WriterToolBase):
 
         outline_id = f'{context.context_id}-outline-markdown'
         node_id_by_ref = self._markdown_outline_node_ids(targets)
-        figure_targets = self._figure_placeholder_targets(
-            instruction_by_ref.values(),
-            lambda instruction: node_id_by_ref[
-                (tuple(instruction.content_ref.heading_path), instruction.content_ref.occurrence)
-            ],
+        needs_by_ref = self._markdown_visual_needs_by_ref(visual_plan)
+        target_by_need = self._markdown_visual_targets(
+            targets, node_id_by_ref, needs_by_ref,
         )
         normalized = []
         for level, heading_path, occurrence, _ in targets:
@@ -615,8 +615,12 @@ class WriterPlanningTools(WriterToolBase):
                 'outline_title': heading_path[0],
                 'outline_node_id': node_id_by_ref[key],
             })
+            instruction.visual_needs = []
             self._normalize_cross_references(
-                instruction, node_id_by_ref[key], node_id_by_ref, figure_targets,
+                instruction, node_id_by_ref[key], node_id_by_ref, target_by_need,
+            )
+            self._bind_markdown_visual_references(
+                instruction, node_id_by_ref[key], needs_by_ref[key],
             )
             normalized.append(instruction)
 
@@ -651,6 +655,59 @@ class WriterPlanningTools(WriterToolBase):
             node_id = 'sec-' + '-'.join(f'{value:03d}' for value in counters)
             ids[(tuple(heading_path), occurrence)] = node_id
         return ids
+
+    @staticmethod
+    def _markdown_visual_needs_by_ref(
+        visual_plan: VisualPlan,
+    ) -> Dict[tuple[tuple[str, ...], int], List[Any]]:
+        needs: Dict[tuple[tuple[str, ...], int], List[Any]] = {}
+        for need in visual_plan.instructions:
+            key = (tuple(need.content_ref.heading_path), need.content_ref.occurrence)
+            needs.setdefault(key, []).append(need)
+        return needs
+
+    @staticmethod
+    def _markdown_visual_targets(
+        targets: List[tuple[int, List[str], int, str]],
+        node_id_by_ref: Dict[tuple[tuple[str, ...], int], str],
+        needs_by_ref: Dict[tuple[tuple[str, ...], int], List[Any]],
+    ) -> Dict[str, str]:
+        target_by_need: Dict[str, str] = {}
+        for level, heading_path, occurrence, _ in targets:
+            key = (tuple(heading_path), occurrence)
+            section_id = node_id_by_ref[key]
+            for index, need in enumerate(needs_by_ref.get(key, []), start=1):
+                target_by_need[need.need_id] = f'image-{section_id}-{index:02d}'
+        return target_by_need
+
+    @staticmethod
+    def _bind_markdown_visual_references(
+        instruction: SectionInstruction,
+        section_id: str,
+        needs: List[Any],
+    ) -> None:
+        references = [
+            item for item in instruction.meta.get('cross_references') or []
+            if isinstance(item, dict) and not item.get('must_create')
+        ]
+        planned_creates = [
+            item for item in instruction.meta.get('cross_references') or []
+            if isinstance(item, dict) and item.get('must_create')
+        ]
+        for index, need in enumerate(needs, start=1):
+            model_item = planned_creates[index - 1] if index <= len(planned_creates) else {}
+            references.append({
+                'target': f'image-{section_id}-{index:02d}',
+                'kind': 'image',
+                'required': need.required,
+                'must_create': True,
+                'caption': str(
+                    model_item.get('caption') or need.purpose or instruction.section_title
+                ),
+                'guidance': str(model_item.get('guidance') or need.purpose),
+                'need_id': need.need_id,
+            })
+        instruction.meta['cross_references'] = references
 
     @staticmethod
     def _figure_placeholder_targets(

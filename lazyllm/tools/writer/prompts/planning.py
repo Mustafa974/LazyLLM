@@ -249,8 +249,8 @@ Requirements:
 - relation_constraints should describe ordinary continuity with neighboring sections;
   the drafting model expresses that continuity in prose.
 - Use the visual plan to shape section goals, ordering, and transitions when its content_ref targets
-  the same section. Keep acquisition details out of SectionInstruction; image cross-references may
-  still use meta.cross_references with their own caption and placeholder_id.
+  the same section. Keep acquisition details out of SectionInstruction; the system binds every
+  planned visual need to its created-image cross-reference target.
 - expected_blocks should be a concise block-level content plan for the draft tool.
 - For a normal-length section, expected_blocks should usually contain 3 to 6 planned content
   blocks. Use fewer and merge coverage cues when the total document budget is short.
@@ -263,12 +263,9 @@ Requirements:
    For Writer IR, target_ref is {{"node_id": "..."}} copied from the outline.
    For Markdown, target_ref is the target section's {{"heading_path": [...], "occurrence": 1}}.
    Its guidance names the information the reader needs from that target.
-- When this section must create and reference an image, add an object to
-   meta.cross_references with must_create=true, kind="image", a concrete caption,
-   required=true, and concise guidance. Give it a stable placeholder_id such as
-   figure-1 when other sections may reference it; the system assigns the final target ID.
-- To reference an image created in another section, use
-   target_ref: {{"node_id": "<that image's placeholder_id>"}} with kind="image".
+- Visual plan needs own created images. Do not add must_create image objects; the system adds them.
+   To reference a planned image in this or another section, use
+   target_ref: {{"node_id": "<that visual need_id>"}} with must_create=false and kind="image".
 - Describe references naturally; the system renders their numbers.
 - Do not invent facts that conflict with writing context.
 
