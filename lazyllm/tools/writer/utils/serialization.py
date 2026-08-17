@@ -156,8 +156,23 @@ def parse_markdown_sections(markdown: str) -> List[tuple[int, List[str], int, st
     heading_path: List[str] = []
     occurrences: dict[tuple[str, ...], int] = {}
     current: Optional[tuple[int, List[str], int, List[str]]] = None
+    fence: Optional[str] = None
 
     for line in markdown.splitlines():
+        fence_match = re.match(r'^\s*(```+|~~~+)', line)
+        if fence_match:
+            marker = fence_match.group(1)[0]
+            if fence is None:
+                fence = marker
+            elif fence == marker:
+                fence = None
+            if current is not None:
+                current[3].append(line)
+            continue
+        if fence is not None:
+            if current is not None:
+                current[3].append(line)
+            continue
         match = re.match(r'^(#{1,6})\s+(.+?)\s*$', line)
         if not match:
             if current is not None:

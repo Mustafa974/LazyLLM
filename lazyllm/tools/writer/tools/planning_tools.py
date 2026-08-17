@@ -413,18 +413,8 @@ class WriterPlanningTools(WriterToolBase):
     @staticmethod
     def _normalize_markdown_outline(outline: str) -> str:
         lines: List[str] = []
-        fence: Optional[str] = None
-        for line in outline.splitlines():
-            fence_match = re.match(r'^\s*(```+|~~~+)', line)
-            if fence_match:
-                marker = fence_match.group(1)[0]
-                if fence is None:
-                    fence = marker
-                elif fence == marker:
-                    fence = None
-                lines.append(line)
-                continue
-            if fence is not None:
+        for line, in_fence in WriterPlanningTools._markdown_lines_with_fence_state(outline):
+            if in_fence:
                 lines.append(line)
                 continue
             heading = re.match(r'^(#{1,6})\s+(.+?)\s*$', line)
@@ -433,7 +423,34 @@ class WriterPlanningTools(WriterToolBase):
                 lines.append(f'{heading.group(1)} {title}')
                 continue
             lines.append(line)
+        return WriterPlanningTools._materialize_markdown_outline_anchors(
+            '\n'.join(lines).rstrip() + '\n',
+        )
+
+    @staticmethod
+    def _materialize_markdown_outline_anchors(outline: str) -> str:
+        _, targets = get_markdown_outline_targets(outline)
+        target_ids = iter(
+            WriterPlanningTools._markdown_outline_node_ids(targets).values()
+        )
+        lines: List[str] = []
+        for line, in_fence in WriterPlanningTools._markdown_lines_with_fence_state(outline):
+            if not in_fence and re.match(r'^##\s+.+?\s*$', line):
+                lines.extend((f'<a id="block-{next(target_ids)}"></a>', ''))
+            lines.append(line)
         return '\n'.join(lines).rstrip() + '\n'
+
+    @staticmethod
+    def _markdown_lines_with_fence_state(markdown: str):
+        fence: Optional[str] = None
+        for line in markdown.splitlines():
+            fence_match = re.match(r'^\s*(```+|~~~+)', line)
+            if fence_match:
+                marker = fence_match.group(1)[0]
+                yield line, True
+                fence = marker if fence is None else None if fence == marker else fence
+                continue
+            yield line, fence is not None
 
     def _normalize_outline(
         self,
