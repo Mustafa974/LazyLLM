@@ -448,18 +448,41 @@ def _markdown_block_content(token: Dict[str, Any]) -> tuple[str, str]:
     return _markdown_token_text(token), 'paragraph'
 
 
-def _render_block_markdown(block: WriterBlock, level: int) -> List[str]:
+def _render_spans_markdown(spans: List[WriterSpan]) -> str:
+    parts: List[str] = []
+    for span in spans:
+        link = span.style.get('link')
+        if isinstance(link, dict) and link.get('type') == 'internal_ref':
+            target = str(link.get('target_node_id') or '')
+            parts.append(f'[{span.text}](#block-{target})' if target else span.text)
+        elif isinstance(link, dict) and isinstance(link.get('url'), str):
+            parts.append(f'[{span.text}]({link["url"]})')
+        else:
+            parts.append(span.text)
+    return ''.join(parts)
+
+
+def _render_block_markdown(
+    block: WriterBlock,
+    level: int,
+) -> List[str]:
     parts: List[str] = []
     heading_level = min(max(level, 1), 6)
+    if block.type in {'heading', 'image', 'table', 'code'}:
+        parts.append(f'<a id="block-{block.node_id}"></a>')
+    content = (
+        _render_spans_markdown(block.spans)
+        if block.spans and block.type not in {'image', 'table', 'code'}
+        else block.content
+    ).strip()
     if block.type == 'heading':
-        if block.content.strip():
-            parts.append(f'{"#" * heading_level} {block.content.strip()}')
+        if content:
+            parts.append(f'{"#" * heading_level} {content}')
     elif block.type == 'list_item':
-        if block.content.strip():
+        if content:
             marker = '1.' if block.numbering.get('ordered') else '-'
-            parts.append(f'{marker} {block.content.strip()}')
+            parts.append(f'{marker} {content}')
     else:
-        content = block.content.strip()
         if content:
             parts.append(content)
     for child in block.children:

@@ -25,10 +25,10 @@ from ..utils import (
     get_markdown_outline_targets,
     make_markdown_tool_result,
     parse_markdown_sections,
-    render_document_markdown,
     strip_caption_numbering,
     strip_heading_numbering,
     to_prompt_json,
+    writer_document_to_markdown,
 )
 
 class WriterDraftingTools(WriterToolBase):
@@ -657,7 +657,7 @@ class WriterDraftingTools(WriterToolBase):
             result['output_file_path'] = path
             return result
 
-        content = render_document_markdown(draft_document)
+        content = writer_document_to_markdown(draft_document)
         final_document = WriterDocument(
             document_id=f'output-{draft_document.document_id}',
             stage='final',

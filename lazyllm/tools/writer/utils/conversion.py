@@ -246,7 +246,8 @@ class _MarkdownParser:
                 else:
                     blocks.append(self.block(
                         'heading', rich.content, spans=rich.spans,
-                        references=rich.references, numbering={'level': level},
+                        references=rich.references,
+                        numbering={'level': max(level - 1, 1)},
                     ))
                 self.emitted = True
                 continue
@@ -492,11 +493,34 @@ def _render_inline(block: WriterBlock) -> str:
         if url:
             title_value = str(media.get('title') or '')
             title = f' "{title_value.replace(chr(34), chr(92) + chr(34))}"' if title_value else ''
-            return f'![{_escape_markdown_text(str(media.get("alt") or content))}]({url}{title})'
+            alt = content or str(media.get('alt') or '')
+            return f'![{_escape_markdown_text(alt)}]({url}{title})'
+
+    references = list(block.references)
+    if ''.join(span.text for span in block.spans) == content:
+        offset = 0
+        for span in block.spans:
+            style = _span_style(span)
+            link = style.get('link')
+            if isinstance(link, dict):
+                target = str(link.get('target_node_id') or '')
+                url = ''
+                if link.get('type') == 'internal_ref' and target:
+                    url = f'#block-{target.removeprefix("block-")}'
+                elif isinstance(link.get('url'), str):
+                    url = link['url']
+                if url:
+                    reference = {
+                        'type': 'link', 'url': url,
+                        'start': offset, 'end': offset + len(span.text),
+                    }
+                    if reference not in references:
+                        references.append(reference)
+            offset += len(span.text)
 
     references = sorted(
         (
-            item for item in block.references
+            item for item in references
             if item.get('type') in {'link', 'markdown_image'}
             and isinstance(item.get('start'), (int, float))
             and isinstance(item.get('end'), (int, float))
@@ -586,8 +610,13 @@ def _render_block(block: WriterBlock, depth: int, allow_raw: bool) -> str:
             return raw
     if block.type == 'document':
         return _render_block_sequence(block.children, depth, allow_raw)
+    anchor = (
+        f'<a id="block-{block.node_id}"></a>'
+        if block.type in {'heading', 'image', 'table', 'code'}
+        else ''
+    )
     if block.type == 'heading':
-        level = max(1, min(6, int(block.numbering.get('level') or 2)))
+        level = min(max(int(block.numbering.get('level') or 1) + 1, 2), 6)
         current = f'{"#" * level} {_render_inline(block)}'
     elif block.type == 'paragraph':
         current = _render_inline(block)
@@ -614,7 +643,7 @@ def _render_block(block: WriterBlock, depth: int, allow_raw: bool) -> str:
     else:
         current = block.content
     children = _render_block_sequence(block.children, depth, allow_raw)
-    return '\n\n'.join(filter(None, [current, children]))
+    return '\n\n'.join(filter(None, [anchor, current, children]))
 
 
 def _render_block_sequence(
@@ -646,6 +675,10 @@ def _render_block_sequence(
 
 
 def writer_document_to_markdown(document: WriterDocument) -> str:
+    from ..numbering import build_numbering_view_from_ir, compute_numbering, materialize_ir
+
+    numbering = compute_numbering(build_numbering_view_from_ir(document))
+    document = materialize_ir(document, numbering)
     source = document.metadata.get('markdown_source')
     signature = document.metadata.get('markdown_signature')
     if isinstance(source, str) and signature == _document_signature(document):
