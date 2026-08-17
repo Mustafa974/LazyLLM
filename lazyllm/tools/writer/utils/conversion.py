@@ -15,18 +15,6 @@ from .artifact import deserialize_artifact_json, serialize_artifact_json
 WriterSourceFormat = Literal['markdown', 'lmd', 'writer_document']
 WriterTargetFormat = Literal['markdown', 'lmd']
 
-_TEXT_COLOR_HEX = {
-    1: '#D83931', 2: '#DE7802', 3: '#DC9B04', 4: '#2EA121',
-    5: '#245BDB', 6: '#6425D0', 7: '#8F959E',
-}
-_BACKGROUND_COLOR_HEX = {
-    1: '#FBBFBC', 2: '#FED4A4', 3: '#FFF67A', 4: '#B7EDB1',
-    5: '#BACEFD', 6: '#CDB2FA', 7: '#DEE0E3', 8: '#F76964',
-    9: '#FFA53D', 10: '#FFE928', 11: '#62D256', 12: '#4E83FD',
-    13: '#935AF6', 14: '#BBBFC4',
-}
-
-
 @dataclass
 class _InlineContent:
     content: str = ''
@@ -466,16 +454,6 @@ def _render_styled_text(value: str, span: Optional[WriterSpan]) -> str:
         result = f'*{result}*'
     if style.get('strike') or style.get('strikethrough'):
         result = f'~~{result}~~'
-    if style.get('underline'):
-        result = f'<u>{result}</u>'
-    text_color = _TEXT_COLOR_HEX.get(style.get('text_color'))
-    background = _BACKGROUND_COLOR_HEX.get(style.get('background_color'))
-    if text_color or background:
-        css = ';'.join(filter(None, [
-            f'color:{text_color}' if text_color else '',
-            f'background-color:{background}' if background else '',
-        ]))
-        result = f'<span style="{css}">{result}</span>'
     return result
 
 
