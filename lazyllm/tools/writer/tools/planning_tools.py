@@ -548,6 +548,10 @@ class WriterPlanningTools(WriterToolBase):
             )
             for block in target_blocks
         ]
+        self._set_cross_reference_targets(
+            instruction_list.instructions,
+            [*node_id_by_original.values(), *visual_targets],
+        )
         instruction_list.meta.update({
             'source': 'llm',
             'representation': 'ir',
@@ -626,6 +630,11 @@ class WriterPlanningTools(WriterToolBase):
             self._bind_visual_references(instruction, needs_by_ref.get(key, []))
             normalized.append(instruction)
 
+        self._set_cross_reference_targets(
+            normalized,
+            [*node_id_by_ref.values(), *visual_targets],
+        )
+
         instruction_list.outline_id = outline_id
         instruction_list.instruction_set_id = f'{outline_id}-section-instructions'
         instruction_list.instructions = normalized
@@ -642,6 +651,15 @@ class WriterPlanningTools(WriterToolBase):
             ),
         })
         return self._normalize_section_length_budgets(instruction_list, task)
+
+    @staticmethod
+    def _set_cross_reference_targets(
+        instructions: List[SectionInstruction],
+        targets: List[str],
+    ) -> None:
+        normalized = list(dict.fromkeys(targets))
+        for instruction in instructions:
+            instruction.meta['cross_reference_targets'] = normalized
 
     @staticmethod
     def _markdown_outline_node_ids(
@@ -674,17 +692,25 @@ class WriterPlanningTools(WriterToolBase):
         needs: List[Any],
     ) -> None:
         references = [
-            item for item in instruction.meta.get('cross_references') or []
+            dict(item) for item in instruction.meta.get('cross_references') or []
             if isinstance(item, dict) and not item.get('must_create')
         ]
+        references_by_target = {
+            str(item.get('target')): item for item in references
+        }
         for need in needs:
-            references.append({
-                'target': need.need_id,
-                'kind': 'image',
-                'required': need.required,
+            reference = references_by_target.get(need.need_id)
+            if reference is None:
+                reference = {
+                    'target': need.need_id,
+                    'kind': 'image',
+                    'guidance': need.purpose,
+                }
+                references.append(reference)
+            reference.update({
+                'required': bool(reference.get('required')) or need.required,
                 'must_create': True,
                 'caption': need.purpose or instruction.section_title,
-                'guidance': need.purpose,
             })
         instruction.meta['cross_references'] = references
 

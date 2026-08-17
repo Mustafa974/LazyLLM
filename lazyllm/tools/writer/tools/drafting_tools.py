@@ -99,7 +99,6 @@ class WriterDraftingTools(WriterToolBase):
         )
         prompt = self._markdown_draft_prompt(
             writing_task, instruction, writing_context, previous_blocks,
-            visual_plan,
         )
         heading = self._markdown_draft_heading(instruction)
         prefix = self._markdown_draft_prefix(instruction, heading)
@@ -262,7 +261,7 @@ class WriterDraftingTools(WriterToolBase):
         result_extra: Dict[str, Any],
     ) -> dict:
         prompt = self._markdown_draft_prompt(
-            task, instruction, context, previous_blocks, visual_plan,
+            task, instruction, context, previous_blocks,
         )
         body = self._call_llm_text(prompt)
         body = self._condense_markdown_section_if_needed(body, instruction)
@@ -374,29 +373,13 @@ class WriterDraftingTools(WriterToolBase):
         instruction: SectionInstruction,
         context: WritingContext,
         previous_blocks: Any,
-        visual_plan: Any = None,
     ) -> str:
         previous_markdown = self._unified_previous_markdown(previous_blocks)
-        resolved_visual_plan = self._unified_optional_model(visual_plan, VisualPlan) or VisualPlan()
-        key = (tuple(instruction.content_ref.heading_path), instruction.content_ref.occurrence)
-        section_visual_needs = {
-            'visual_needs': [
-                {
-                    'need_id': need.need_id,
-                    'visual_type': need.visual_type,
-                    'purpose': need.purpose,
-                    'required': need.required,
-                }
-                for need in resolved_visual_plan.instructions
-                if (tuple(need.content_ref.heading_path), need.content_ref.occurrence) == key
-            ],
-        }
         return GENERATE_DRAFT_SECTION_MARKDOWN_PROMPT.format(
             task_json=to_prompt_json(task),
             section_instruction_json=to_prompt_json(instruction),
             context_json=to_prompt_json(context),
             previous_markdown=previous_markdown or '(none)',
-            section_visual_needs_json=to_prompt_json(section_visual_needs),
         )
 
     def _finalize_markdown_draft_section(
@@ -831,11 +814,7 @@ class WriterDraftingTools(WriterToolBase):
         *,
         allow_deferred_create: bool = False,
     ) -> None:
-        references = [
-            item for item in instruction.meta.get('cross_references') or []
-            if isinstance(item, dict)
-        ]
-        allowed_targets = {str(item.get('target')) for item in references}
+        references, allowed_targets = WriterDraftingTools._cross_reference_plan(instruction)
         block_by_id = {block.node_id: block for block in draft_block.iter_blocks()}
         for item in references:
             if not item.get('must_create'):
@@ -890,12 +869,9 @@ class WriterDraftingTools(WriterToolBase):
         body: str,
         instruction: SectionInstruction,
     ) -> str:
-        references = [
-            item for item in instruction.meta.get('cross_references') or []
-            if isinstance(item, dict)
-        ]
-        allowed_targets = {str(item.get('target')) for item in references}
+        references, allowed_targets = cls._cross_reference_plan(instruction)
         found_targets: set[str] = set()
+        reference_lines: Dict[str, int] = {}
         found_anchors: set[str] = set()
         created_targets = {
             str(item.get('target')): item
@@ -940,17 +916,33 @@ class WriterDraftingTools(WriterToolBase):
                 if target not in allowed_targets:
                     raise ValueError(f'Unplanned Markdown cross-reference {target!r}.')
                 found_targets.add(target)
+                reference_lines.setdefault(target, len(output))
                 return f'[](#block-{target})'
 
             line = cls._MARKDOWN_INTERNAL_LINK_RE.sub(replace_link, line)
             output.append(line)
 
+        missing = [
+            str(item.get('target')) for item in references
+            if item.get('required', True)
+            and str(item.get('target')) not in found_targets
+        ]
+        if missing:
+            raise ValueError(f'Missing required cross-references: {missing!r}.')
+
+        insertions: List[tuple[int, str]] = []
         for item in references:
             target = str(item.get('target'))
             if item.get('must_create'):
                 if target not in media_lines:
-                    if item.get('required', True):
-                        raise ValueError(f'Missing planned media placeholder {target!r}.')
+                    if target not in found_targets:
+                        continue
+                    caption = strip_caption_numbering(str(item.get('caption') or '图'))
+                    insertions.append((
+                        reference_lines[target] + 1,
+                        f'\n<a id="block-{target}"></a>\n'
+                        f'![{caption}](media-placeholder://{target})',
+                    ))
                     continue
                 if f'block-{target}' not in found_anchors:
                     pattern = re.compile(
@@ -967,9 +959,23 @@ class WriterDraftingTools(WriterToolBase):
                         + output[media_lines[target]][start:]
                     )
                     found_anchors.add(f'block-{target}')
-            if item.get('required', True) and target not in found_targets:
-                raise ValueError(f'Missing required cross-reference {target!r}.')
+        for index, markdown in reversed(insertions):
+            output.insert(index, markdown)
         return '\n'.join(output).strip()
+
+    @staticmethod
+    def _cross_reference_plan(
+        instruction: SectionInstruction,
+    ) -> tuple[List[Dict[str, Any]], set[str]]:
+        references = [
+            item for item in instruction.meta.get('cross_references') or []
+            if isinstance(item, dict)
+        ]
+        allowed_targets = {str(item.get('target')) for item in references}
+        document_targets = instruction.meta.get('cross_reference_targets')
+        if isinstance(document_targets, list):
+            allowed_targets.update(str(target) for target in document_targets)
+        return references, allowed_targets
 
     @staticmethod
     def _ensure_markdown_outline_anchors(markdown: str) -> str:
