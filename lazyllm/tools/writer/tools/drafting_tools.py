@@ -11,6 +11,7 @@ from ..data_models.task import WritingTask
 from ..data_models.writer_ir import WriterBlock, WriterDocument
 from ..data_models.planning import SectionInstruction
 from ..numbering import (
+    MARKDOWN_ANCHOR_RE,
     build_numbering_view_from_ir,
     build_numbering_view_from_markdown,
     compute_numbering,
@@ -39,7 +40,7 @@ class WriterDraftingTools(WriterToolBase):
     ]
 
     _MARKDOWN_INTERNAL_LINK_RE = re.compile(r'\[([^\]]*)\]\(#((?:block-)?[^)]+)\)')
-    _MARKDOWN_ANCHOR_RE = re.compile(r'<a id="((?:block-)?[^"]+)"></a>')
+    _MARKDOWN_ANCHOR_RE = MARKDOWN_ANCHOR_RE
     _MARKDOWN_MEDIA_PLACEHOLDER_RE = re.compile(
         r'!\[[^\]]*\]\(media-placeholder://([A-Za-z0-9_-]+)\)'
     )
@@ -442,7 +443,7 @@ class WriterDraftingTools(WriterToolBase):
     def _markdown_draft_prefix(instruction: SectionInstruction, heading: str) -> str:
         outline_node_id = instruction.meta.get('outline_node_id')
         if outline_node_id:
-            return f'<a id="block-{outline_node_id}"></a>\n\n{heading}\n\n'
+            return f'<a id="block-{outline_node_id}"></a>\n{heading}\n\n'
         return f'{heading}\n\n'
 
     def _draft_stream_idle_timeout(self, idle_timeout: Optional[float]) -> float:
@@ -864,7 +865,7 @@ class WriterDraftingTools(WriterToolBase):
                     continue
                 target = link.get('target_node_id')
                 if target not in allowed_targets:
-                    continue
+                    raise ValueError(f'Unplanned IR cross-reference {target!r}.')
                 span.text = ''
                 found_targets.add(str(target))
             if block.spans:
@@ -935,17 +936,11 @@ class WriterDraftingTools(WriterToolBase):
                 media_lines[target] = len(output)
 
             def replace_link(match: re.Match[str]) -> str:
-                raw_target = match.group(2)
-                if raw_target.startswith('block-'):
-                    target = raw_target[len('block-'):]
-                    if target not in allowed_targets:
-                        return match.group(0)
-                    found_targets.add(target)
-                    return f'[](#block-{target})'
-                if raw_target not in allowed_targets:
-                    return match.group(0)
-                found_targets.add(raw_target)
-                return f'[](#block-{raw_target})'
+                target = match.group(2).removeprefix('block-')
+                if target not in allowed_targets:
+                    raise ValueError(f'Unplanned Markdown cross-reference {target!r}.')
+                found_targets.add(target)
+                return f'[](#block-{target})'
 
             line = cls._MARKDOWN_INTERNAL_LINK_RE.sub(replace_link, line)
             output.append(line)
@@ -968,12 +963,10 @@ class WriterDraftingTools(WriterToolBase):
                     start = media.start()
                     output[media_lines[target]] = (
                         output[media_lines[target]][:start]
-                        + f'<a id="block-{target}"></a>'
+                        + f'<a id="block-{target}"></a>\n'
                         + output[media_lines[target]][start:]
                     )
                     found_anchors.add(f'block-{target}')
-                if item.get('kind') == 'image':
-                    found_targets.add(target)
             if item.get('required', True) and target not in found_targets:
                 raise ValueError(f'Missing required cross-reference {target!r}.')
         return '\n'.join(output).strip()

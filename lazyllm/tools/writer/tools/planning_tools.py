@@ -436,7 +436,7 @@ class WriterPlanningTools(WriterToolBase):
         lines: List[str] = []
         for line, in_fence in WriterPlanningTools._markdown_lines_with_fence_state(outline):
             if not in_fence and re.match(r'^##\s+.+?\s*$', line):
-                lines.extend((f'<a id="block-{next(target_ids)}"></a>', ''))
+                lines.append(f'<a id="block-{next(target_ids)}"></a>')
             lines.append(line)
         return '\n'.join(lines).rstrip() + '\n'
 
