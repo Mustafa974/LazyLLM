@@ -1,6 +1,6 @@
 from __future__ import annotations
 import re
-from typing import Any, Callable, Dict, Iterable, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from .base import WriterToolBase
 from .stream_tools import DraftPreviewStream, build_outline_stream
@@ -508,10 +508,14 @@ class WriterPlanningTools(WriterToolBase):
                 + ', '.join(missing_node_ids)
             )
 
-        figure_targets = self._figure_placeholder_targets(
-            instruction_by_node_id.values(),
-            lambda instruction: node_id_by_original[instruction.content_ref.node_id],
-        )
+        needs_by_section: Dict[str, List[Any]] = {}
+        for need in (visual_plan or VisualPlan()).instructions:
+            needs_by_section.setdefault(need.content_ref.node_id, []).append(need)
+        visual_targets = {
+            need.need_id
+            for needs in needs_by_section.values()
+            for need in needs
+        }
         instruction_list.outline_id = outline.document_id
         instruction_list.instruction_set_id = f'{outline.document_id}-section-instructions'
         instruction_list.instructions = [
@@ -522,30 +526,11 @@ class WriterPlanningTools(WriterToolBase):
                 bool(context.facts),
                 node_id_by_original,
                 node_id_by_original[block.node_id],
-                figure_targets,
+                visual_targets,
+                needs_by_section.get(node_id_by_original[block.node_id], []),
             )
             for block in target_blocks
         ]
-        if visual_plan is not None:
-            needs_by_section: Dict[str, int] = {}
-            for need in visual_plan.instructions:
-                node_id = need.content_ref.node_id
-                if node_id and need.required:
-                    needs_by_section[node_id] = needs_by_section.get(node_id, 0) + 1
-            for instruction in instruction_list.instructions:
-                must_create_images = [
-                    item for item in instruction.meta.get('cross_references') or []
-                    if item.get('must_create') and item.get('kind') == 'image'
-                ]
-                if not must_create_images:
-                    continue
-                section_id = instruction.content_ref.node_id
-                need_count = needs_by_section.get(section_id, 0)
-                if need_count < len(must_create_images):
-                    raise ValueError(
-                        f'Section {section_id!r} plans {len(must_create_images)} created '
-                        f'image(s) but the visual plan provides {need_count} required need(s).'
-                    )
         instruction_list.meta.update({
             'source': 'llm',
             'representation': 'ir',
@@ -596,9 +581,11 @@ class WriterPlanningTools(WriterToolBase):
         outline_id = f'{context.context_id}-outline-markdown'
         node_id_by_ref = self._markdown_outline_node_ids(targets)
         needs_by_ref = self._markdown_visual_needs_by_ref(visual_plan)
-        target_by_need = self._markdown_visual_targets(
-            targets, node_id_by_ref, needs_by_ref,
-        )
+        visual_targets = {
+            need.need_id
+            for needs in needs_by_ref.values()
+            for need in needs
+        }
         normalized = []
         for level, heading_path, occurrence, _ in targets:
             key = (tuple(heading_path), occurrence)
@@ -617,11 +604,9 @@ class WriterPlanningTools(WriterToolBase):
             })
             instruction.visual_needs = []
             self._normalize_cross_references(
-                instruction, node_id_by_ref[key], node_id_by_ref, target_by_need,
+                instruction, node_id_by_ref, visual_targets,
             )
-            self._bind_markdown_visual_references(
-                instruction, node_id_by_ref[key], needs_by_ref[key],
-            )
+            self._bind_visual_references(instruction, needs_by_ref[key])
             normalized.append(instruction)
 
         instruction_list.outline_id = outline_id
@@ -667,76 +652,31 @@ class WriterPlanningTools(WriterToolBase):
         return needs
 
     @staticmethod
-    def _markdown_visual_targets(
-        targets: List[tuple[int, List[str], int, str]],
-        node_id_by_ref: Dict[tuple[tuple[str, ...], int], str],
-        needs_by_ref: Dict[tuple[tuple[str, ...], int], List[Any]],
-    ) -> Dict[str, str]:
-        target_by_need: Dict[str, str] = {}
-        for level, heading_path, occurrence, _ in targets:
-            key = (tuple(heading_path), occurrence)
-            section_id = node_id_by_ref[key]
-            for index, need in enumerate(needs_by_ref.get(key, []), start=1):
-                target_by_need[need.need_id] = f'image-{section_id}-{index:02d}'
-        return target_by_need
-
-    @staticmethod
-    def _bind_markdown_visual_references(
+    def _bind_visual_references(
         instruction: SectionInstruction,
-        section_id: str,
         needs: List[Any],
     ) -> None:
         references = [
             item for item in instruction.meta.get('cross_references') or []
             if isinstance(item, dict) and not item.get('must_create')
         ]
-        planned_creates = [
-            item for item in instruction.meta.get('cross_references') or []
-            if isinstance(item, dict) and item.get('must_create')
-        ]
-        for index, need in enumerate(needs, start=1):
-            model_item = planned_creates[index - 1] if index <= len(planned_creates) else {}
+        for need in needs:
             references.append({
-                'target': f'image-{section_id}-{index:02d}',
+                'target': need.need_id,
                 'kind': 'image',
                 'required': need.required,
                 'must_create': True,
-                'caption': str(
-                    model_item.get('caption') or need.purpose or instruction.section_title
-                ),
-                'guidance': str(model_item.get('guidance') or need.purpose),
-                'need_id': need.need_id,
+                'caption': need.purpose or instruction.section_title,
+                'guidance': need.purpose,
             })
         instruction.meta['cross_references'] = references
-
-    @staticmethod
-    def _figure_placeholder_targets(
-        instructions: Iterable[SectionInstruction],
-        section_id_of: Callable[[SectionInstruction], str],
-    ) -> Dict[str, str]:
-        targets: Dict[str, str] = {}
-        for instruction in instructions:
-            section_id = section_id_of(instruction)
-            created = 0
-            for item in instruction.meta.get('cross_references') or []:
-                if not isinstance(item, dict) or not item.get('must_create'):
-                    continue
-                created += 1
-                placeholder = str(item.get('placeholder_id') or '').strip()
-                if not placeholder:
-                    continue
-                if placeholder in targets:
-                    raise ValueError(f'Duplicate cross-reference placeholder_id {placeholder!r}.')
-                targets[placeholder] = f'image-{section_id}-{created:02d}'
-        return targets
 
     @classmethod
     def _normalize_cross_references(
         cls,
         instruction: SectionInstruction,
-        section_id: str,
         section_ids: Dict[tuple[tuple[str, ...], int], str] | Dict[str, str],
-        figure_targets: Dict[str, str] | None = None,
+        visual_targets: set[str] | None = None,
     ) -> None:
         raw_references = instruction.meta.get('cross_references')
         if raw_references is None:
@@ -748,37 +688,30 @@ class WriterPlanningTools(WriterToolBase):
                 'cross_references must be a list.'
             )
 
-        created_count = 0
         normalized: List[Dict[str, Any]] = []
         for item in raw_references:
             if not isinstance(item, dict):
                 raise ValueError('Each cross-reference must be an object.')
             must_create = bool(item.get('must_create'))
             if must_create:
-                created_count += 1
-                kind = 'image'
-                caption = str(item.get('caption') or '').strip()
-                if not caption:
-                    caption = instruction.section_title.strip() or f'{kind}-{section_id}'
-                target = f'{kind}-{section_id}-{created_count:02d}'
-            else:
-                target_ref = item.get('target_ref')
-                target = cls._resolve_cross_reference_target(
-                    target_ref, section_ids, figure_targets or {},
-                )
-                kind = (
-                    'image'
-                    if target in (figure_targets or {}).values()
-                    else str(item.get('kind') or 'section')
-                )
-                if kind not in {'section', 'image'}:
-                    kind = 'section'
+                raise ValueError('Created image cross-references are owned by the visual plan.')
+            target_ref = item.get('target_ref')
+            target = cls._resolve_cross_reference_target(
+                target_ref, section_ids, visual_targets or set(),
+            )
+            kind = (
+                'image'
+                if target in (visual_targets or set())
+                else str(item.get('kind') or 'section')
+            )
+            if kind not in {'section', 'image'}:
+                raise ValueError(f'Unsupported cross-reference kind {kind!r}.')
 
             normalized.append({
                 'target': target,
                 'kind': kind,
                 'required': bool(item.get('required', True)),
-                'must_create': must_create,
+                'must_create': False,
                 'caption': str(item.get('caption') or '').strip(),
                 'guidance': str(item.get('guidance') or '').strip(),
             })
@@ -788,7 +721,7 @@ class WriterPlanningTools(WriterToolBase):
     def _resolve_cross_reference_target(
         target_ref: Any,
         section_ids: Dict[tuple[tuple[str, ...], int], str] | Dict[str, str],
-        figure_targets: Dict[str, str],
+        visual_targets: set[str],
     ) -> str:
         if isinstance(target_ref, dict) and isinstance(section_ids, dict):
             node_id = target_ref.get('node_id')
@@ -796,8 +729,8 @@ class WriterPlanningTools(WriterToolBase):
                 mapped = section_ids.get(node_id)
                 if mapped is not None:
                     return mapped
-                if node_id in figure_targets:
-                    return figure_targets[node_id]
+                if node_id in visual_targets:
+                    return node_id
             heading_path = target_ref.get('heading_path')
             occurrence = int(target_ref.get('occurrence') or 1)
             if isinstance(heading_path, list):
@@ -1016,7 +949,8 @@ class WriterPlanningTools(WriterToolBase):
         has_available_facts: bool,
         node_id_by_original: Dict[str, str],
         outline_node_id: str,
-        figure_targets: Dict[str, str],
+        visual_targets: set[str],
+        section_needs: List[Any],
     ) -> SectionInstruction:
         self._validate_instruction(instruction, block.node_id)
         instruction.section_title = block.content
@@ -1033,8 +967,9 @@ class WriterPlanningTools(WriterToolBase):
             'outline_node_id': outline_node_id,
         })
         self._normalize_cross_references(
-            instruction, outline_node_id, node_id_by_original, figure_targets,
+            instruction, node_id_by_original, visual_targets,
         )
+        self._bind_visual_references(instruction, section_needs)
         return instruction
 
     @staticmethod

@@ -56,8 +56,6 @@ _HEADING_RE = re.compile(r'^(#{2,6})\s+(.+?)\s*$')
 _IMAGE_RE = re.compile(r'!\[([^\]]*)\]\([^)]*\)')
 _INTERNAL_LINK_RE = re.compile(r'\[([^\]]*)\]\(#(block-[^)]+)\)')
 _CODE_FENCE_RE = re.compile(r'^\s*(```+|~~~+)(.*)$')
-_HEADING_NUMBER_PREFIX_RE = re.compile(r'^\d+(?:\.\d+)*\s+')
-_FLOAT_NUMBER_PREFIX_RE = re.compile(r'^(图|表|代码)\d+(?:\.\d+)*\s+')
 
 
 def encode_anchor_id(node_id: str) -> str:
@@ -366,25 +364,13 @@ def dematerialize_ir(
 ) -> WriterDocument:
     result = document.model_copy(deep=True)
     for block in _iter_blocks(result.blocks):
-        stripped = False
         entry = base_numbering.get(block.node_id)
-        if entry is not None and block.type in {'heading', 'image', 'table', 'code'}:
+        if entry is not None and _KIND_BY_TYPE.get(block.type) == entry.kind:
             prefix = f'{format_target_number(entry)} '
             if block.content.startswith(prefix):
                 block.content = block.content[len(prefix):]
-                stripped = True
             if block.spans and block.spans[0].text.startswith(prefix):
                 block.spans[0].text = block.spans[0].text[len(prefix):]
-                stripped = True
-        if not stripped and block.type in {'heading', 'image', 'table', 'code'}:
-            prefix_re = _HEADING_NUMBER_PREFIX_RE if block.type == 'heading' else _FLOAT_NUMBER_PREFIX_RE
-            match = prefix_re.match(block.content)
-            if match:
-                block.content = block.content[match.end():]
-            if block.spans and block.spans[0].text:
-                match = prefix_re.match(block.spans[0].text)
-                if match:
-                    block.spans[0].text = block.spans[0].text[match.end():]
         for span in block.spans:
             link = span.style.get('link')
             if isinstance(link, dict) and link.get('type') == 'internal_ref':
@@ -395,12 +381,16 @@ def dematerialize_ir(
 
 
 def dematerialize_markdown(markdown: str, base_numbering: NumberingMap | None = None) -> str:
+    semantic_items = list(_markdown_semantic_items(markdown))
     view = build_numbering_view_from_markdown(markdown)
-    targets = list(view.targets)
-    target_index = 0
+    targets_by_line: dict[int, list[NumberingTarget]] = {}
+    for (line_index, *_), target in zip(semantic_items, view.targets):
+        targets_by_line.setdefault(line_index, []).append(target)
+
     output: list[str] = []
     fence: str | None = None
-    for line in markdown.splitlines():
+    lines = markdown.splitlines()
+    for index, line in enumerate(lines):
         fence_match = _CODE_FENCE_RE.match(line)
         if fence_match:
             marker = fence_match.group(1)[0]
@@ -413,38 +403,54 @@ def dematerialize_markdown(markdown: str, base_numbering: NumberingMap | None = 
         if fence is not None:
             output.append(line)
             continue
-        if re.match(r'^(图|表|代码)\d+', line.strip()):
-            continue
+
+        next_targets = targets_by_line.get(index + 1, [])
+        if len(next_targets) == 1 and next_targets[0].kind in {'table', 'code'}:
+            entry = (base_numbering or {}).get(next_targets[0].id)
+            if entry is not None and entry.kind == next_targets[0].kind:
+                caption = f'{format_target_number(entry)} {entry.caption or ""}'.strip()
+                if line == caption:
+                    continue
+
         heading = _HEADING_RE.match(line)
         if heading:
-            target = targets[target_index] if target_index < len(targets) else None
-            if target is not None and target.kind == 'section':
-                target_index += 1
-                entry = (base_numbering or {}).get(target.id)
-                prefix = f'{format_target_number(entry)} ' if entry is not None else None
-                if prefix and line.startswith(heading.group(1) + ' ' + prefix):
+            targets = targets_by_line.get(index, [])
+            target = targets[0] if len(targets) == 1 else None
+            entry = (base_numbering or {}).get(target.id) if target is not None else None
+            if (
+                target is not None and target.kind == 'section'
+                and entry is not None and entry.kind == target.kind
+            ):
+                prefix = f'{format_target_number(entry)} '
+                if heading.group(2).startswith(prefix):
                     line = f'{heading.group(1)} {heading.group(2)[len(prefix):]}'.rstrip()
-                else:
-                    line = re.sub(r'^(#{2,6})\s+\d+(?:\.\d+)*\s+', r'\1 ', line)
         else:
-            for image in _IMAGE_RE.finditer(line):
-                target = targets[target_index] if target_index < len(targets) else None
-                if target is not None and target.kind == 'figure':
-                    target_index += 1
+            images = list(_IMAGE_RE.finditer(line))
+            targets = [
+                target for target in targets_by_line.get(index, [])
+                if target.kind == 'figure'
+            ]
+            if images and len(images) == len(targets):
+                pieces: list[str] = []
+                last = 0
+                for image, target in zip(images, targets):
+                    replacement = image.group(0)
                     entry = (base_numbering or {}).get(target.id)
-                    prefix = f'{format_target_number(entry)} ' if entry is not None else None
+                    prefix = (
+                        f'{format_target_number(entry)} '
+                        if entry is not None and entry.kind == target.kind
+                        else None
+                    )
                     if prefix and image.group(1).startswith(prefix):
-                        line = line.replace(image.group(0), image.group(0).replace(
+                        replacement = replacement.replace(
                             f'![{image.group(1)}]',
                             f'![{image.group(1)[len(prefix):]}]',
                             1,
-                        ))
-                    else:
-                        line = re.sub(
-                            r'!\[(?:图|表|代码)\d+\s+([^\]]*)\]',
-                            r'![\1]',
-                            line,
                         )
+                    pieces.extend((line[last:image.start()], replacement))
+                    last = image.end()
+                pieces.append(line[last:])
+                line = ''.join(pieces)
         line = _INTERNAL_LINK_RE.sub(r'[](#\2)', line)
         output.append(line)
     return '\n'.join(output)

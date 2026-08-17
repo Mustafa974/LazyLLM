@@ -258,7 +258,8 @@ Requirements:
 - Plan a section cross-reference when this section's text will point readers to
    another section for a specific definition, result, or method - for example a
    conclusion citing the experiments it summarizes. This is expected when the writing
-   task asks for cross-references. Background continuity readers are assumed to know
+   task asks for cross-references; in that case include at least one section reference.
+   Background continuity readers are assumed to know
    (such as narrative chapters building on earlier events) belongs in relation_constraints.
    For Writer IR, target_ref is {{"node_id": "..."}} copied from the outline.
    For Markdown, target_ref is the target section's {{"heading_path": [...], "occurrence": 1}}.

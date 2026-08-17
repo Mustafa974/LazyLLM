@@ -8,7 +8,7 @@ from .stream_tools import DraftIRStream, DraftMarkdownStream
 from ..data_models.context import WritingContext
 from ..data_models.multimodal import MediaAssetLibrary, VisualPlan
 from ..data_models.task import WritingTask
-from ..data_models.writer_ir import WriterBlock, WriterDocument, WriterSpan
+from ..data_models.writer_ir import WriterBlock, WriterDocument
 from ..data_models.planning import SectionInstruction
 from ..numbering import (
     build_numbering_view_from_ir,
@@ -153,7 +153,12 @@ class WriterDraftingTools(WriterToolBase):
                 block, instruction, allow_deferred_create=True,
             ),
             finalize=lambda block: self._save_ir_draft_section(
-                self._attach_section_media(block, instruction, visual_plan, media_assets),
+                self._normalize_draft_block(
+                    self._attach_section_media(
+                        block, instruction, visual_plan, media_assets,
+                    ),
+                    instruction,
+                ),
                 result_extra,
                 media_assets,
             ),
@@ -297,15 +302,17 @@ class WriterDraftingTools(WriterToolBase):
         section_id = instruction.content_ref.node_id
         needs = [
             need for need in resolved_plan.instructions
-            if need.content_ref.node_id == section_id and need.required
+            if need.content_ref.node_id == section_id
         ]
-        targets = [
-            str(item.get('target'))
-            for item in instruction.meta.get('cross_references') or []
-            if item.get('must_create') and item.get('kind') == 'image' and item.get('target')
-        ]
+        needs_by_id = {need.need_id: need for need in needs}
         block_by_id = {block.node_id: block for block in draft_block.iter_blocks()}
-        for target, need in zip(targets, needs):
+        for item in instruction.meta.get('cross_references') or []:
+            if not item.get('must_create') or item.get('kind') != 'image':
+                continue
+            target = str(item.get('target'))
+            need = needs_by_id.get(target)
+            if need is None:
+                continue
             asset_ids = [
                 asset_id for asset_id in library.visual_need_asset_ids.get(need.need_id, [])
                 if asset_id in library.assets
@@ -313,28 +320,12 @@ class WriterDraftingTools(WriterToolBase):
             if len(asset_ids) != 1:
                 continue
             image = block_by_id.get(target)
-            if image is None or image.type != 'image':
-                continue
-            if any(
-                reference.get('type') == 'media_asset' and reference.get('id')
-                for reference in image.references or []
-            ):
-                continue
-            image.references = [{'type': 'media_asset', 'id': asset_ids[0]}]
-        for item in instruction.meta.get('cross_references') or []:
-            if not item.get('must_create') or item.get('kind') != 'image':
-                continue
-            target = str(item.get('target'))
-            if block_by_id.get(target) is not None:
-                continue
-            if target not in targets:
-                continue
-            need = needs[targets.index(target)]
-            asset_ids = [
-                asset_id for asset_id in library.visual_need_asset_ids.get(need.need_id, [])
-                if asset_id in library.assets
-            ]
-            if len(asset_ids) != 1:
+            if image is not None:
+                if image.type == 'image' and not any(
+                    reference.get('type') == 'media_asset' and reference.get('id')
+                    for reference in image.references or []
+                ):
+                    image.references = [{'type': 'media_asset', 'id': asset_ids[0]}]
                 continue
             image = WriterBlock(
                 node_id=target,
@@ -345,36 +336,6 @@ class WriterDraftingTools(WriterToolBase):
             )
             draft_block.children.append(image)
             block_by_id[target] = image
-        referenced = {
-            span.style['link']['target_node_id']
-            for block in draft_block.iter_blocks()
-            for span in block.spans
-            if isinstance(span.style.get('link'), dict)
-            and span.style['link'].get('type') == 'internal_ref'
-            and span.style['link'].get('target_node_id')
-        }
-        for item in instruction.meta.get('cross_references') or []:
-            if not item.get('must_create') or item.get('kind') != 'image':
-                continue
-            target = str(item.get('target'))
-            if target in referenced:
-                continue
-            paragraph = next(
-                (
-                    block for block in draft_block.iter_blocks()
-                    if block.type == 'paragraph' and block.content.strip()
-                ),
-                None,
-            )
-            if paragraph is None:
-                continue
-            if not paragraph.spans:
-                paragraph.spans.append(WriterSpan(text=paragraph.content))
-            paragraph.spans.append(WriterSpan(
-                text='',
-                style={'link': {'type': 'internal_ref', 'target_node_id': target}},
-            ))
-            paragraph.content = ''.join(span.text for span in paragraph.spans)
         return draft_block
 
     def _condense_markdown_section_if_needed(
@@ -881,7 +842,7 @@ class WriterDraftingTools(WriterToolBase):
             target = str(item.get('target'))
             target_block = block_by_id.get(target)
             if target_block is None or target_block.type != str(item.get('kind')):
-                if allow_deferred_create:
+                if allow_deferred_create or not item.get('required', True):
                     continue
                 raise ValueError(f'Missing created cross-reference target {target!r}.')
             if target_block.type == 'image':
@@ -935,8 +896,8 @@ class WriterDraftingTools(WriterToolBase):
         allowed_targets = {str(item.get('target')) for item in references}
         found_targets: set[str] = set()
         found_anchors: set[str] = set()
-        created_by_need = {
-            str(item.get('need_id')): item
+        created_targets = {
+            str(item.get('target')): item
             for item in references
             if item.get('must_create')
         }
@@ -966,12 +927,12 @@ class WriterDraftingTools(WriterToolBase):
                 elif raw_target in allowed_targets:
                     anchors.append(raw_target)
             found_anchors.update(f'block-{target}' for target in anchors)
-            for need_id in cls._MARKDOWN_MEDIA_PLACEHOLDER_RE.findall(line):
-                if need_id in media_lines:
-                    raise ValueError(f'Duplicate media placeholder {need_id!r}.')
-                if need_id not in created_by_need:
-                    raise ValueError(f'Unplanned media placeholder {need_id!r}.')
-                media_lines[need_id] = len(output)
+            for target in cls._MARKDOWN_MEDIA_PLACEHOLDER_RE.findall(line):
+                if target in media_lines:
+                    raise ValueError(f'Duplicate media placeholder {target!r}.')
+                if target not in created_targets:
+                    raise ValueError(f'Unplanned media placeholder {target!r}.')
+                media_lines[target] = len(output)
 
             def replace_link(match: re.Match[str]) -> str:
                 raw_target = match.group(2)
@@ -992,26 +953,23 @@ class WriterDraftingTools(WriterToolBase):
         for item in references:
             target = str(item.get('target'))
             if item.get('must_create'):
-                need_id = str(item.get('need_id') or '')
-                if not need_id:
-                    raise ValueError(f'Created image cross-reference {target!r} lacks need_id.')
-                if need_id not in media_lines:
+                if target not in media_lines:
                     if item.get('required', True):
-                        raise ValueError(f'Missing planned media placeholder {need_id!r}.')
+                        raise ValueError(f'Missing planned media placeholder {target!r}.')
                     continue
                 if f'block-{target}' not in found_anchors:
                     pattern = re.compile(
                         r'!\[[^\]]*\]\(media-placeholder://'
-                        + re.escape(need_id) + r'\)'
+                        + re.escape(target) + r'\)'
                     )
-                    media = pattern.search(output[media_lines[need_id]])
+                    media = pattern.search(output[media_lines[target]])
                     if media is None:
-                        raise ValueError(f'Invalid media placeholder {need_id!r}.')
+                        raise ValueError(f'Invalid media placeholder {target!r}.')
                     start = media.start()
-                    output[media_lines[need_id]] = (
-                        output[media_lines[need_id]][:start]
+                    output[media_lines[target]] = (
+                        output[media_lines[target]][:start]
                         + f'<a id="block-{target}"></a>'
-                        + output[media_lines[need_id]][start:]
+                        + output[media_lines[target]][start:]
                     )
                     found_anchors.add(f'block-{target}')
             if item.get('required', True) and target not in found_targets:

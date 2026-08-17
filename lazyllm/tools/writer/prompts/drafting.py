@@ -32,10 +32,8 @@ Requirements:
   Its content is the final Chinese caption and references must contain exactly one
   {{"type": "media_asset", "id": "..."}} entry from section_media. Do not invent asset IDs,
   paths, URLs, tokens, placeholders, or image blocks for unresolved needs.
-  The image block node_id is the cross-reference target, but its media_asset id is not that
-  target; copy the exact matching media_asset_id from section_media.
-  Example: when target is "image-sec-1-01" and section_media has media_asset_id "asset-abc",
-  emit node_id="image-sec-1-01" and references=[{{"type":"media_asset","id":"asset-abc"}}].
+  The image block node_id is both the visual need_id and cross-reference target; its
+  media_asset id is separate and must be copied from section_media.
 - Omit spans, provider_binding and provider_payload; the system manages them.
 - Use section_instruction.meta.cross_references as the authoritative cross-reference plan.
   For each item, the normalized "target" is the exact node_id to use.
@@ -88,14 +86,15 @@ Requirements:
 - Use ordinary Markdown paragraphs, lists, quotes, fenced code, tables, images, and
   subheadings only when they help the requested content.
 - Use section_instruction.meta.cross_references as the authoritative cross-reference plan.
-  Each item's "target" is the exact system key. For a required target, emit exactly
-  [](#block-<target>) once in natural prose. Do not invent target keys outside this plan.
+  Each item's "target" is the exact system key; an image target equals its visual need_id.
+  For a required target, emit exactly [](#block-<target>) once in natural prose.
+  Do not invent target keys outside this plan.
 - Return substantial finished prose, not a summary, placeholder, or planning notes.
 - section_visual_needs lists the visual needs planned for this section. It is independent
   of whether media resolution succeeds. When a required visual need is listed, place its
   image at the most appropriate reading position using exactly:
   ![short caption](media-placeholder://<need_id>).
-  Use only the need_id bound to a must_create cross-reference. Emit each planned image
+  Use the shared need_id/target from the must_create cross-reference. Emit each planned image
   exactly once; the system inserts its numbering anchor.
 - Do not output image markup for anything outside this section's section_visual_needs list.
 
