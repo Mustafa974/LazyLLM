@@ -60,6 +60,7 @@ class WriterDraftingTools(WriterToolBase):
                 instruction,
                 writing_context,
                 previous_blocks,
+                visual_plan,
                 result_extra,
             )
 
@@ -79,6 +80,7 @@ class WriterDraftingTools(WriterToolBase):
         section_instruction: Any,
         context: Any,
         previous_blocks: Any = None,
+        visual_plan: Any = None,
         *,
         idle_timeout: Optional[float] = None,
     ) -> DraftMarkdownStream:
@@ -93,6 +95,7 @@ class WriterDraftingTools(WriterToolBase):
         )
         prompt = self._markdown_draft_prompt(
             writing_task, instruction, writing_context, previous_blocks,
+            visual_plan,
         )
         heading = self._markdown_draft_heading(instruction)
         prefix = self._markdown_draft_prefix(instruction, heading)
@@ -246,9 +249,12 @@ class WriterDraftingTools(WriterToolBase):
         instruction: SectionInstruction,
         context: WritingContext,
         previous_blocks: Any,
+        visual_plan: Any,
         result_extra: Dict[str, Any],
     ) -> dict:
-        prompt = self._markdown_draft_prompt(task, instruction, context, previous_blocks)
+        prompt = self._markdown_draft_prompt(
+            task, instruction, context, previous_blocks, visual_plan,
+        )
         body = self._call_llm_text(prompt)
         body = self._condense_markdown_section_if_needed(body, instruction)
         return self._finalize_markdown_draft_section(body, instruction, result_extra)
@@ -403,13 +409,29 @@ class WriterDraftingTools(WriterToolBase):
         instruction: SectionInstruction,
         context: WritingContext,
         previous_blocks: Any,
+        visual_plan: Any = None,
     ) -> str:
         previous_markdown = self._unified_previous_markdown(previous_blocks)
+        resolved_visual_plan = self._unified_optional_model(visual_plan, VisualPlan) or VisualPlan()
+        key = (tuple(instruction.content_ref.heading_path), instruction.content_ref.occurrence)
+        section_visual_needs = {
+            'visual_needs': [
+                {
+                    'need_id': need.need_id,
+                    'visual_type': need.visual_type,
+                    'purpose': need.purpose,
+                    'required': need.required,
+                }
+                for need in resolved_visual_plan.instructions
+                if (tuple(need.content_ref.heading_path), need.content_ref.occurrence) == key
+            ],
+        }
         return GENERATE_DRAFT_SECTION_MARKDOWN_PROMPT.format(
             task_json=to_prompt_json(task),
             section_instruction_json=to_prompt_json(instruction),
             context_json=to_prompt_json(context),
             previous_markdown=previous_markdown or '(none)',
+            section_visual_needs_json=to_prompt_json(section_visual_needs),
         )
 
     def _finalize_markdown_draft_section(

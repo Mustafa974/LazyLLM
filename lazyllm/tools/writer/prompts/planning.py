@@ -20,6 +20,8 @@ Requirements:
   them as standalone planning sections.
 - For non-fiction, reports, and articles, use H2 only for sections that should appear in
   the final document.
+- Do not create image-annotation headings such as "图片：..." or "Image: ..." at any level.
+  Image needs are planned by the visual plan step; the outline must stay pure text structure.
 - Keep the outline concise but concrete enough to guide drafting.
 - Treat task.constraints.target_chars and task.constraints.max_chars as limits for the
   entire final document, not for each section.
@@ -65,6 +67,8 @@ Requirements:
   character, setting, theme, and style requirements into the relevant chapters.
 - For non-fiction, reports, and articles, use top-level heading blocks only for sections
   that should appear in the final document.
+- Do not create heading blocks named "图片：..." or "Image: ..." for image planning; visual
+  needs are handled by the visual plan step, not by outline headings.
 - All user-visible outline text MUST use the same document tree contract as draft and final content:
   put section titles in heading block.content, and put section descriptions and key points in
   paragraph or list_item blocks under block.children.
@@ -195,6 +199,33 @@ Outline:
 '''
 
 
+GENERATE_VISUAL_PLAN_MARKDOWN_PROMPT = '''Generate a visual plan for this Markdown outline.
+
+Requirements:
+- Return a VisualPlan object.
+- Create a visual only when the user explicitly requires it or it materially improves the section.
+- Each content_ref must target exactly one H2 section from target_sections: use its exact
+  heading_path and occurrence. Do not use node_id or document_root.
+- Use the most appropriate visual_type. preferred_strategy is optional; if omitted, the system
+  derives it from visual_type. Do not use image_generation for chart or table.
+- purpose must state what the visual communicates for its section.
+- Set required=true only when the user explicitly requires the visual.
+- Do not change the outline. Do not generate asset IDs, paths, URLs, captions, placeholders, or upload details.
+
+Writing task:
+{task_json}
+
+Writing context:
+{context_json}
+
+Outline:
+{outline_json}
+
+Target H2 sections:
+{target_sections_json}
+'''
+
+
 GENERATE_SECTION_INSTRUCTIONS_PROMPT = '''Generate section-level writing instructions from the outline and writing context.
 
 Requirements:
@@ -218,8 +249,8 @@ Requirements:
 - relation_constraints should describe ordinary continuity with neighboring sections;
   the drafting model expresses that continuity in prose.
 - Use the visual plan to shape section goals, ordering, and transitions when its content_ref targets
-  the same section. Do not copy visual needs into SectionInstruction or generate asset IDs, paths,
-  placeholders, captions, or acquisition instructions.
+  the same section. Keep acquisition details out of SectionInstruction; image cross-references may
+  still use meta.cross_references with their own caption and placeholder_id.
 - expected_blocks should be a concise block-level content plan for the draft tool.
 - For a normal-length section, expected_blocks should usually contain 3 to 6 planned content
   blocks. Use fewer and merge coverage cues when the total document budget is short.

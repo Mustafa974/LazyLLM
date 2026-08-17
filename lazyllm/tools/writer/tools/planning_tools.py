@@ -16,6 +16,7 @@ from ..prompts import (
     GENERATE_REWRITE_OUTLINE_PROMPT,
     GENERATE_REWRITE_SECTION_INSTRUCTIONS_PROMPT,
     GENERATE_SECTION_INSTRUCTIONS_PROMPT,
+    GENERATE_VISUAL_PLAN_MARKDOWN_PROMPT,
     GENERATE_VISUAL_PLAN_PROMPT,
 )
 from ..utils import (
@@ -228,6 +229,24 @@ class WriterPlanningTools(WriterToolBase):
             )
             visual_plan = self._normalize_visual_plan(
                 self._call_llm_structured(prompt, VisualPlan), writing_outline)
+        else:
+            _, targets = get_markdown_outline_targets(writing_outline)
+            target_payload = [
+                {
+                    'content_ref': {'heading_path': heading_path, 'occurrence': occurrence},
+                    'section_title': heading_path[-1],
+                    'outline_heading_level': level,
+                }
+                for level, heading_path, occurrence, _ in targets
+            ]
+            prompt = GENERATE_VISUAL_PLAN_MARKDOWN_PROMPT.format(
+                task_json=to_prompt_json(writing_task),
+                context_json=to_prompt_json(writing_context),
+                outline_json=writing_outline,
+                target_sections_json=to_prompt_json(target_payload),
+            )
+            visual_plan = self._normalize_markdown_visual_plan(
+                self._call_llm_structured(prompt, VisualPlan), targets)
         return self._save_artifacts(
             {'visual_plan': visual_plan},
             step_name='generate_visual_plan',
@@ -351,6 +370,33 @@ class WriterPlanningTools(WriterToolBase):
             counts[canonical_id] = counts.get(canonical_id, 0) + 1
             need.need_id = f'visual-{canonical_id}-{counts[canonical_id]}'
             need.content_ref.node_id = canonical_id
+        return visual_plan
+
+    @staticmethod
+    def _normalize_markdown_visual_plan(
+        visual_plan: VisualPlan,
+        targets: List[tuple[int, List[str], int, str]],
+    ) -> VisualPlan:
+        target_by_ref = {
+            (tuple(heading_path), occurrence): (level, heading_path)
+            for level, heading_path, occurrence, _ in targets
+        }
+        for index, need in enumerate(visual_plan.instructions, start=1):
+            ref = need.content_ref
+            if ref.node_id or ref.document_root or not ref.heading_path:
+                raise ValueError('Markdown visual plan must target an H2 section via heading_path.')
+            heading_path = ref.heading_path[:2]
+            key = (tuple(heading_path), ref.occurrence)
+            if key not in target_by_ref:
+                raise ValueError(f'Visual plan targets unknown Markdown H2 section {key!r}.')
+            if not need.purpose.strip():
+                raise ValueError(f'Visual need for {key!r} has an empty purpose.')
+            if need.preferred_strategy is None:
+                need.preferred_strategy = _VISUAL_STRATEGY_ORDER[need.visual_type][0]
+            ref.heading_path = list(heading_path)
+            ref.occurrence = key[1]
+            ref.placeholder_id = f'IMAGE-{index}'
+            need.need_id = ref.placeholder_id
         return visual_plan
 
     @staticmethod
