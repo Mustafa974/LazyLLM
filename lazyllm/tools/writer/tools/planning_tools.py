@@ -9,13 +9,14 @@ from ..data_models.multimodal import VisualPlan
 from ..data_models.resource import ResourceProfile
 from ..data_models.task import WritingTask
 from ..data_models.writer_ir import ContentRef, WriterBlock, WriterDocument
-from ..data_models.planning import SectionInstruction, SectionInstructionList
+from ..data_models.planning import SectionInstruction, SectionInstructionList, ShortWritingPlan
 from ..prompts import (
     GENERATE_OUTLINE_MARKDOWN_PROMPT,
     GENERATE_OUTLINE_PROMPT,
     GENERATE_REWRITE_OUTLINE_PROMPT,
     GENERATE_REWRITE_SECTION_INSTRUCTIONS_PROMPT,
     GENERATE_SECTION_INSTRUCTIONS_PROMPT,
+    GENERATE_SHORT_WRITING_PLAN_PROMPT,
     GENERATE_VISUAL_PLAN_MARKDOWN_PROMPT,
     GENERATE_VISUAL_PLAN_PROMPT,
 )
@@ -47,6 +48,7 @@ class WriterPlanningTools(WriterToolBase):
         'generate_rewrite_outline',
         'generate_rewrite_section_instructions',
         'generate_section_instructions',
+        'generate_short_writing_plan',
     ]
 
     def generate_outline(
@@ -227,6 +229,47 @@ class WriterPlanningTools(WriterToolBase):
             },
         ).model_dump()
 
+    def generate_short_writing_plan(
+        self,
+        task: Any,
+        context: Any,
+        execution_results: Any = None,
+    ) -> dict:
+        writing_task = self._unified_model(task, WritingTask)
+        writing_context = self._unified_model(context, WritingContext)
+        execution_data = self._unified_raw_data(execution_results)
+        prompt = GENERATE_SHORT_WRITING_PLAN_PROMPT.format(
+            task_json=to_prompt_json(writing_task),
+            context_json=to_prompt_json(writing_context),
+            execution_results_json=to_prompt_json(execution_data),
+        )
+        plan = self._normalize_short_writing_plan(
+            self._call_llm_structured(prompt, ShortWritingPlan),
+            writing_task,
+            writing_context,
+            execution_data,
+        )
+        return self._save_artifacts(
+            {'short_writing_plan': plan},
+            step_name='generate_short_writing_plan',
+            primary_key='short_writing_plan',
+            context_key=None,
+            summary='Generated a whole-document writing plan for a short article.',
+            counts={
+                'required_points': len(plan.required_points),
+                'expected_blocks': len(plan.expected_blocks),
+            },
+            extra={
+                'representation': plan.meta['representation'],
+                'document_title': plan.section_title,
+            },
+            artifact_meta={
+                'task_id': writing_task.task_id,
+                'context_id': writing_context.context_id,
+                'has_execution_results': execution_data is not None,
+            },
+        ).model_dump()
+
     def generate_visual_plan(self, task: Any, outline: Any, context: Any) -> dict:
         writing_task = self._unified_model(task, WritingTask)
         writing_outline = self._unified_document(outline)
@@ -267,6 +310,59 @@ class WriterPlanningTools(WriterToolBase):
             counts={'visual_instructions': len(visual_plan.instructions)},
             extra={'representation': 'ir' if isinstance(writing_outline, WriterDocument) else 'markdown'},
         ).model_dump()
+
+    @classmethod
+    def _normalize_short_writing_plan(
+        cls,
+        plan: ShortWritingPlan,
+        task: WritingTask,
+        context: WritingContext,
+        execution_results: Any,
+    ) -> ShortWritingPlan:
+        title = str(
+            task.target_document.title
+            if task.target_document and task.target_document.title
+            else plan.section_title
+        ).strip()
+        if not title:
+            raise ValueError('Short writing plan requires a document title.')
+        if not plan.section_goal.strip():
+            raise ValueError('Short writing plan requires a section_goal.')
+        if not plan.core_viewpoint.strip():
+            raise ValueError('Short writing plan requires a core_viewpoint.')
+
+        valid_reference_ids = {
+            value
+            for fact in context.facts
+            for value in [fact.fact_id, *fact.source]
+            if value
+        }
+        plan.instruction_id = f'{context.context_id}-short-writing-plan'
+        plan.content_ref = ContentRef(document_root=True)
+        plan.section_title = strip_heading_numbering(title)
+        plan.section_goal = plan.section_goal.strip()
+        plan.core_viewpoint = plan.core_viewpoint.strip()
+        plan.references = [
+            dict(reference)
+            for reference in plan.references
+            if isinstance(reference, dict) and reference.get('id') in valid_reference_ids
+        ]
+        if not context.facts:
+            plan.fact_constraints = []
+
+        representation = cls._resolve_representation(task, None)
+        plan.meta.update({
+            'source': 'llm',
+            'representation': representation,
+            'document_title': plan.section_title,
+            'context_id': context.context_id,
+            'has_execution_results': execution_results is not None,
+        })
+        for key in ('target_chars', 'max_chars'):
+            value = task.constraints.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                plan.meta[key] = value
+        return plan
 
     def generate_section_instructions(
         self,

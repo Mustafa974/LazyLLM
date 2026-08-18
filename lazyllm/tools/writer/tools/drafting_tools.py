@@ -9,7 +9,7 @@ from ..data_models.context import WritingContext
 from ..data_models.multimodal import MediaAssetLibrary, VisualPlan
 from ..data_models.task import WritingTask
 from ..data_models.writer_ir import WriterBlock, WriterDocument
-from ..data_models.planning import SectionInstruction
+from ..data_models.planning import SectionInstruction, ShortWritingPlan
 from ..numbering import (
     MARKDOWN_ANCHOR_RE,
     build_numbering_view_from_ir,
@@ -21,6 +21,7 @@ from ..prompts import (
     CONDENSE_DRAFT_SECTION_PROMPT,
     GENERATE_DRAFT_SECTION_MARKDOWN_PROMPT,
     GENERATE_DRAFT_SECTION_PROMPT,
+    GENERATE_SHORT_DOCUMENT_MARKDOWN_PROMPT,
 )
 from ..utils import (
     get_markdown_outline_targets,
@@ -36,6 +37,7 @@ class WriterDraftingTools(WriterToolBase):
     __public_apis__ = [
         'generate_draft_section',
         'generate_draft_document',
+        'generate_short_document',
         'generate_final_document',
     ]
 
@@ -76,6 +78,53 @@ class WriterDraftingTools(WriterToolBase):
             visual_plan,
             media_assets,
             result_extra,
+        )
+
+    def generate_short_document(
+        self,
+        task: Any,
+        short_writing_plan: Any,
+        context: Any,
+    ) -> dict:
+        writing_task = self._unified_model(task, WritingTask)
+        plan = self._unified_model(short_writing_plan, ShortWritingPlan)
+        writing_context = self._unified_model(context, WritingContext)
+        self._validate_short_writing_plan(plan)
+        prompt = self._short_document_prompt(writing_task, plan, writing_context)
+        body = self._call_llm_text(prompt)
+        body = self._condense_short_markdown_if_needed(body, writing_task, plan)
+        return self._finalize_short_markdown_document(
+            body, writing_task, plan, writing_context,
+        )
+
+    def stream_short_document(
+        self,
+        task: Any,
+        short_writing_plan: Any,
+        context: Any,
+        *,
+        idle_timeout: Optional[float] = None,
+    ) -> DraftMarkdownStream:
+        writing_task = self._unified_model(task, WritingTask)
+        plan = self._unified_model(short_writing_plan, ShortWritingPlan)
+        writing_context = self._unified_model(context, WritingContext)
+        self._validate_short_writing_plan(plan)
+        prompt = self._short_document_prompt(writing_task, plan, writing_context)
+        prefix = f'# {strip_heading_numbering(plan.section_title.strip())}\n\n'
+        return DraftMarkdownStream(
+            call=lambda sink: self._call_llm_text(
+                prompt,
+                stream_output={'_stream_sink': sink},
+            ),
+            finalize=lambda body: self._finalize_short_markdown_document(
+                body,
+                writing_task,
+                plan,
+                writing_context,
+            ),
+            prefix=prefix,
+            idle_timeout=self._draft_stream_idle_timeout(idle_timeout),
+            label='Short document Markdown',
         )
 
     def stream_draft_section(
@@ -195,6 +244,109 @@ class WriterDraftingTools(WriterToolBase):
         )
         block = self._condense_ir_section_if_needed(block, instruction)
         return self._save_ir_draft_section(block, result_extra, media_assets)
+
+    @staticmethod
+    def _validate_short_writing_plan(plan: ShortWritingPlan) -> None:
+        ref = plan.content_ref
+        if not ref.document_root or ref.node_id or ref.heading_path or ref.placeholder_id:
+            raise ValueError('Short writing plan must target only content_ref.document_root.')
+        if plan.meta.get('representation', 'markdown') != 'markdown':
+            raise ValueError('Short document generation currently requires Markdown representation.')
+        if not plan.section_title.strip():
+            raise ValueError('Short writing plan requires a document title.')
+        if not plan.section_goal.strip() or not plan.core_viewpoint.strip():
+            raise ValueError('Short writing plan requires a goal and core viewpoint.')
+
+    @staticmethod
+    def _short_document_prompt(
+        task: WritingTask,
+        plan: ShortWritingPlan,
+        context: WritingContext,
+    ) -> str:
+        return GENERATE_SHORT_DOCUMENT_MARKDOWN_PROMPT.format(
+            task_json=to_prompt_json(task),
+            short_writing_plan_json=to_prompt_json(plan),
+            context_json=to_prompt_json(context),
+        )
+
+    def _condense_short_markdown_if_needed(
+        self,
+        body: str,
+        task: WritingTask,
+        plan: ShortWritingPlan,
+    ) -> str:
+        max_chars = task.constraints.get('max_chars', plan.meta.get('max_chars'))
+        if not isinstance(max_chars, int) or self._text_chars(body) <= max_chars:
+            return body
+        condensed = self._call_llm_text(CONDENSE_DRAFT_SECTION_MARKDOWN_PROMPT.format(
+            max_chars=max_chars,
+            section_instruction_json=to_prompt_json(plan),
+            draft_body=body,
+        )).strip()
+        if self._text_chars(condensed) > max_chars:
+            raise ValueError(f'Condensed short document still exceeds max_chars={max_chars}.')
+        return condensed
+
+    def _finalize_short_markdown_document(
+        self,
+        body: str,
+        task: WritingTask,
+        plan: ShortWritingPlan,
+        context: WritingContext,
+    ) -> dict:
+        body = self._normalize_short_markdown_body(body, plan.section_title)
+        if not body:
+            raise ValueError('Short document body must not be empty.')
+        max_chars = task.constraints.get('max_chars', plan.meta.get('max_chars'))
+        if isinstance(max_chars, int) and self._text_chars(body) > max_chars:
+            raise ValueError(f'Short document exceeds max_chars={max_chars}.')
+        title = strip_heading_numbering(plan.section_title.strip())
+        markdown = f'# {title}\n\n{body}\n'
+        sections = parse_markdown_sections(markdown)
+        if len(sections) != 1 or sections[0][0] != 1:
+            raise ValueError('Short document must contain one H1 title and no other headings.')
+        path = self._write_markdown_artifact('draft_document.md', markdown)
+        return make_markdown_tool_result(
+            path=path,
+            step_name='generate_short_document',
+            artifact_key='draft_document',
+            summary='Generated a complete short document as Markdown.',
+            counts={
+                'draft_sections': 0,
+                'characters': len(markdown),
+                'body_characters': self._text_chars(body),
+            },
+            extra={
+                'representation': 'markdown',
+                'structure_mode': 'flat',
+                'task_id': task.task_id,
+                'context_id': context.context_id,
+                'instruction_id': plan.instruction_id,
+                'outline_title': title,
+            },
+        ).model_dump()
+
+    @staticmethod
+    def _normalize_short_markdown_body(body: str, title: str) -> str:
+        lines: List[str] = []
+        fence: str | None = None
+        normalized_title = strip_heading_numbering(title.strip())
+        for line in body.strip().splitlines():
+            fence_match = re.match(r'^\s*(```+|~~~+)', line)
+            if fence_match:
+                marker = fence_match.group(1)[0]
+                fence = marker if fence is None else None if fence == marker else fence
+                lines.append(line)
+                continue
+            if fence is None:
+                heading = re.match(r'^\s*#{1,6}\s+(.+?)\s*$', line)
+                if heading:
+                    heading_text = strip_heading_numbering(heading.group(1))
+                    if heading_text == normalized_title and not any(item.strip() for item in lines):
+                        continue
+                    line = heading_text
+            lines.append(line)
+        return '\n'.join(lines).strip()
 
     def _ir_draft_prompt(
         self,

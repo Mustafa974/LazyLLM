@@ -148,3 +148,34 @@ Section instruction:
 Draft body:
 {draft_body}
 '''
+
+
+GENERATE_SHORT_DOCUMENT_MARKDOWN_PROMPT = '''Write one complete short article from its whole-document writing plan.
+
+Requirements:
+- Output Markdown body text only. Do not wrap the response in an outer code fence.
+- Do not output the article title; the system adds the single H1 title.
+- Do not output headings or subheadings of any level.
+- Write the complete article in one pass as continuous prose. Paragraph breaks are allowed.
+- Use prose paragraphs rather than lists, tables, block quotes, or planning labels.
+- Treat expected_blocks as an internal order and coverage guide. Do not copy its entries as headings,
+  labels, a checklist, or separately generated fragments.
+- Express core_viewpoint clearly while covering required_points within the available length.
+- Respect fact_constraints and style_constraints.
+- Use relevant references as source guidance, but do not copy reference metadata into the article.
+- Do not invent facts that conflict with the writing context.
+- task.constraints.target_chars is the preferred body length and task.constraints.max_chars is a hard
+  non-whitespace body limit when present. The hard limit takes precedence over exhaustive coverage.
+- Return substantial finished prose, not an outline, summary, review, or planning notes.
+
+Writing task:
+{task_json}
+
+Whole-document writing plan:
+{short_writing_plan_json}
+
+Writing context:
+{context_json}
+
+Write only the finished article body now.
+'''

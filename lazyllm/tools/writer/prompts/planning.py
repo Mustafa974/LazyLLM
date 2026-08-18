@@ -301,3 +301,34 @@ Execution results:
 Visual plan:
 {visual_plan_json}
 '''
+
+
+GENERATE_SHORT_WRITING_PLAN_PROMPT = '''Generate one whole-document writing plan for a short article.
+
+Requirements:
+- Return one ShortWritingPlan object. Do not return an outline, chapter plan, or draft prose.
+- The plan covers the complete article in one writing pass.
+- content_ref must contain only document_root=true.
+- section_title is the article title. Prefer writing_task.target_document.title when provided.
+- section_goal states the writing objective for the complete article.
+- core_viewpoint states the central claim or message that the complete article must communicate.
+- required_points contains the essential content that must appear in the article.
+- fact_constraints contains only factual statements actually present in the writing context.
+- references identifies relevant context facts or resources and must not invent identifiers.
+- style_constraints includes the requested genre, audience, tone, point of view, and style when applicable.
+- expected_blocks is a concise content-order plan for continuous prose. Its entries are internal coverage
+  cues, not visible headings, separate generations, or minimum paragraph counts.
+- Do not create relation_constraints, cross-references, section links, chapters, or subheadings.
+- Keep the plan selective enough to satisfy task.constraints.target_chars and max_chars.
+- Set meta.representation to the requested writing_task.output.representation.
+- Do not invent facts that conflict with the writing context.
+
+Writing task:
+{task_json}
+
+Writing context:
+{context_json}
+
+Execution results:
+{execution_results_json}
+'''

@@ -24,6 +24,24 @@ class SectionInstruction(BaseModel):
     revision_notes: List[str] = Field(default_factory=list)
     meta: Dict[str, Any] = Field(default_factory=dict)
 
+
+class ShortWritingPlan(BaseModel):
+    instruction_id: str
+    content_ref: ContentRef
+    section_title: str
+    section_goal: str
+    core_viewpoint: str
+    required_points: List[str] = Field(default_factory=list)
+    references: List[Dict[str, Any]] = Field(default_factory=list)
+    fact_constraints: List[str] = Field(default_factory=list)
+    style_constraints: List[str] = Field(default_factory=list)
+    visual_needs: List[Dict[str, Any]] = Field(default_factory=list)
+    expected_blocks: List[str] = Field(default_factory=list)
+    pending_subtasks: List[str] = Field(default_factory=list)
+    revision_notes: List[str] = Field(default_factory=list)
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
 class SectionInstructionList(ArtifactModel):
     instruction_set_id: Optional[str] = None
     outline_id: Optional[str] = None
@@ -31,4 +49,4 @@ class SectionInstructionList(ArtifactModel):
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
-__all__ = ['SectionInstruction', 'SectionInstructionList']
+__all__ = ['SectionInstruction', 'SectionInstructionList', 'ShortWritingPlan']
