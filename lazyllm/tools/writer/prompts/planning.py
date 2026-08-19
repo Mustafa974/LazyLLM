@@ -316,6 +316,13 @@ Requirements:
 - fact_constraints contains only factual statements actually present in the writing context.
 - references identifies relevant context facts or resources and must not invent identifiers.
 - style_constraints includes the requested genre, audience, tone, point of view, and style when applicable.
+- visual_needs contains a visual only when the user explicitly requires it or it materially improves
+  the complete article. Return an empty list when the user forbids visuals or no visual is useful.
+- Each visual_needs item contains visual_type, purpose, required, optional preferred_strategy, and
+  meta.placement_hint describing the natural paragraph boundary for insertion. Do not impose a visual
+  count limit; decide from the requested content, length, and explicit user requirements.
+- Set required=true only when the user explicitly requires that visual. Do not generate need IDs,
+  content references, asset IDs, paths, URLs, captions, placeholders, or upload details.
 - expected_blocks is a concise content-order plan for continuous prose. Its entries are internal coverage
   cues, not visible headings, separate generations, or minimum paragraph counts.
 - Do not create relation_constraints, cross-references, section links, chapters, or subheadings.

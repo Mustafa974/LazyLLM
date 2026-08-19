@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Literal, Optional
 from .base import WriterToolBase
 from .stream_tools import DraftPreviewStream, build_outline_stream
 from ..data_models.context import WritingContext
-from ..data_models.multimodal import VisualPlan
+from ..data_models.multimodal import VisualInstruction, VisualPlan
 from ..data_models.resource import ResourceProfile
 from ..data_models.task import WritingTask
 from ..data_models.writer_ir import ContentRef, WriterBlock, WriterDocument
@@ -347,6 +347,7 @@ class WriterPlanningTools(WriterToolBase):
             for reference in plan.references
             if isinstance(reference, dict) and reference.get('id') in valid_reference_ids
         ]
+        plan.visual_needs = cls._normalize_short_visual_needs(plan.visual_needs)
         cls._normalize_fact_constraints(plan, bool(context.facts))
 
         representation = cls._resolve_representation(task, None)
@@ -362,6 +363,34 @@ class WriterPlanningTools(WriterToolBase):
             if isinstance(value, int) and not isinstance(value, bool) and value > 0:
                 plan.meta[key] = value
         return plan
+
+    @staticmethod
+    def _normalize_short_visual_needs(visual_needs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for index, value in enumerate(visual_needs, start=1):
+            if not isinstance(value, dict):
+                raise ValueError('Short writing plan visual_needs must contain objects.')
+            raw = dict(value)
+            raw.pop('need_id', None)
+            raw.pop('content_ref', None)
+            raw_meta = raw.pop('meta', {})
+            meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+            placement_hint = str(raw.pop('placement_hint', '') or meta.get('placement_hint') or '').strip()
+            if placement_hint:
+                meta['placement_hint'] = placement_hint
+            need = VisualInstruction.model_validate({
+                **raw,
+                'need_id': f'visual-document-{index}',
+                'content_ref': {'document_root': True},
+                'meta': meta,
+            })
+            need.purpose = need.purpose.strip()
+            if not need.purpose:
+                raise ValueError(f'Short visual need {index} has an empty purpose.')
+            data = need.model_dump(exclude_defaults=True)
+            data['required'] = need.required
+            normalized.append(data)
+        return normalized
 
     def generate_section_instructions(
         self,

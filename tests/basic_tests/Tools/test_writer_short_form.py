@@ -3,13 +3,19 @@ from copy import copy
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from lazyllm.module.module import ModuleBase
 from lazyllm.tools.writer.data_models import (
     ContentRef,
     DocumentFact,
+    MediaAsset,
+    MediaAssetLibrary,
     SectionInstruction,
     ShortWritingPlan,
     TargetDocument,
+    VisualInstruction,
+    VisualPlan,
     WritingContext,
     WritingTask,
 )
@@ -84,17 +90,52 @@ def test_short_writing_plan_schema_differs_only_for_flat_document_needs():
 
 def test_generate_short_writing_plan_targets_document_root_and_keeps_valid_references():
     task, context, model_plan = _short_inputs()
+    model_plan.visual_needs = [
+        {
+            'need_id': 'model-invented-id',
+            'content_ref': {'node_id': 'model-invented-target'},
+            'visual_type': 'image',
+            'purpose': '  展示降价原因和消费者影响  ',
+            'required': False,
+            'placement_hint': '分析消费者机会之后',
+        },
+        {
+            'visual_type': 'diagram',
+            'purpose': '说明购车决策因素',
+            'required': True,
+        },
+    ]
     with tempfile.TemporaryDirectory() as directory:
         tool = WriterPlanningTools(artifact_store=directory)
-        with patch.object(tool, '_call_llm_structured', return_value=model_plan):
+        with patch.object(tool, '_call_llm_structured', return_value=model_plan) as mocked:
             result = tool.generate_short_writing_plan(task=task, context=context)
         plan = load_artifact_json(result['artifact_path'], ShortWritingPlan)
 
+    prompt = mocked.call_args.args[0]
+    assert 'materially improves' in prompt
+    assert 'Do not impose a visual' in prompt
     assert plan.instruction_id == 'ctx-short-short-writing-plan'
     assert plan.content_ref == ContentRef(document_root=True)
     assert plan.section_title == '新能源汽车降价背后的市场变化'
     assert plan.core_viewpoint == model_plan.core_viewpoint
     assert plan.references == [{'id': 'fact-1'}]
+    assert plan.visual_needs == [
+        {
+            'need_id': 'visual-document-1',
+            'content_ref': {'document_root': True},
+            'visual_type': 'image',
+            'purpose': '展示降价原因和消费者影响',
+            'required': False,
+            'meta': {'placement_hint': '分析消费者机会之后'},
+        },
+        {
+            'need_id': 'visual-document-2',
+            'content_ref': {'document_root': True},
+            'visual_type': 'diagram',
+            'purpose': '说明购车决策因素',
+            'required': True,
+        },
+    ]
     assert plan.meta['target_chars'] == 700
     assert plan.meta['max_chars'] == 800
 
@@ -141,3 +182,67 @@ def test_stream_short_document_emits_title_and_complete_flat_document():
     assert preview == '# 新能源汽车降价背后的市场变化\n\n第一段。\n\n第二段。\n'
     assert markdown == preview
     assert '\n## ' not in markdown
+
+
+def test_generate_short_document_places_only_resolved_planned_visuals():
+    task, context, plan = _short_inputs()
+    plan.content_ref = ContentRef(document_root=True)
+    plan.section_title = task.target_document.title
+    plan.meta['representation'] = 'markdown'
+    visual_plan = VisualPlan(instructions=[VisualInstruction(
+        need_id='visual-document-1',
+        content_ref=ContentRef(document_root=True),
+        visual_type='image',
+        purpose='展示降价原因和消费者影响',
+        meta={'placement_hint': '分析消费者机会之后'},
+    )])
+    media = MediaAssetLibrary(
+        library_id='media-short',
+        assets={
+            'asset-1': MediaAsset(
+                media_asset_id='asset-1',
+                asset_type='generated_image',
+                source_type='image_generation',
+                local_path='/tmp/short-visual.png',
+            ),
+        },
+        visual_need_asset_ids={'visual-document-1': ['asset-1']},
+    )
+    body = (
+        '新能源汽车降价为消费者带来了更低的购车门槛。\n\n'
+        '消费者也需要关注售后服务和保值率。'
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        tool = WriterDraftingTools(artifact_store=directory)
+        with patch.object(tool, '_call_llm_text', return_value=body) as mocked:
+            result = tool.generate_short_document(
+                task=task,
+                short_writing_plan=plan,
+                context=context,
+                visual_plan=visual_plan,
+                media_assets=media,
+            )
+        markdown = Path(result['artifact_path']).read_text(encoding='utf-8')
+
+    prompt = mocked.call_args.args[0]
+    assert 'visual-document-1' in prompt
+    assert '分析消费者机会之后' in prompt
+    assert '/tmp/short-visual.png' not in prompt
+    assert 'media-placeholder://visual-document-1' in markdown
+    assert '\n## ' not in markdown
+
+
+def test_generate_short_document_rejects_unplanned_image_url():
+    task, context, plan = _short_inputs()
+    plan.content_ref = ContentRef(document_root=True)
+    plan.section_title = task.target_document.title
+    plan.meta['representation'] = 'markdown'
+
+    with tempfile.TemporaryDirectory() as directory:
+        tool = WriterDraftingTools(
+            llm=lambda _: '正文。\n\n![未规划图片](https://example.com/invented.png)',
+            artifact_store=directory,
+        )
+        with pytest.raises(ValueError, match='Unplanned short-document image target'):
+            tool.generate_short_document(task=task, short_writing_plan=plan, context=context)

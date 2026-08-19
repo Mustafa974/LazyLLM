@@ -158,6 +158,11 @@ Requirements:
 - Do not output headings or subheadings of any level.
 - Write the complete article in one pass as continuous prose. Paragraph breaks are allowed.
 - Use prose paragraphs rather than lists, tables, block quotes, or planning labels.
+- short_visuals contains resolved visuals for the complete article. For every item, output exactly one
+  standalone Markdown image at a natural paragraph boundary using its exact need_id:
+  ![concise caption](media-placeholder://<need_id>)
+- Use purpose and placement_hint to choose the caption and location. Do not output unplanned images,
+  asset paths, URLs, HTML anchors, or prose links to the image. When short_visuals is empty, output no images.
 - Treat expected_blocks as an internal order and coverage guide. Do not copy its entries as headings,
   labels, a checklist, or separately generated fragments.
 - Express core_viewpoint clearly while covering required_points within the available length.
@@ -176,6 +181,9 @@ Whole-document writing plan:
 
 Writing context:
 {context_json}
+
+Resolved short-document visuals:
+{short_visuals_json}
 
 Write only the finished article body now.
 '''
