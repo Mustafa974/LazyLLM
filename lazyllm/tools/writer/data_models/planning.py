@@ -8,7 +8,7 @@ from ..utils.artifact import ArtifactModel
 from .writer_ir import ContentRef
 
 
-class SectionInstruction(BaseModel):
+class _WritingInstructionBase(BaseModel):
     instruction_id: str
     content_ref: ContentRef
     section_title: str
@@ -17,29 +17,19 @@ class SectionInstruction(BaseModel):
     references: List[Dict[str, Any]] = Field(default_factory=list)
     fact_constraints: List[str] = Field(default_factory=list)
     style_constraints: List[str] = Field(default_factory=list)
+    visual_needs: List[Dict[str, Any]] = Field(default_factory=list)
+    expected_blocks: List[str] = Field(default_factory=list)
+    pending_subtasks: List[str] = Field(default_factory=list)
+    revision_notes: List[str] = Field(default_factory=list)
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SectionInstruction(_WritingInstructionBase):
     relation_constraints: List[str] = Field(default_factory=list)
-    visual_needs: List[Dict[str, Any]] = Field(default_factory=list)
-    expected_blocks: List[str] = Field(default_factory=list)
-    pending_subtasks: List[str] = Field(default_factory=list)
-    revision_notes: List[str] = Field(default_factory=list)
-    meta: Dict[str, Any] = Field(default_factory=dict)
 
 
-class ShortWritingPlan(BaseModel):
-    instruction_id: str
-    content_ref: ContentRef
-    section_title: str
-    section_goal: str
+class ShortWritingPlan(_WritingInstructionBase):
     core_viewpoint: str
-    required_points: List[str] = Field(default_factory=list)
-    references: List[Dict[str, Any]] = Field(default_factory=list)
-    fact_constraints: List[str] = Field(default_factory=list)
-    style_constraints: List[str] = Field(default_factory=list)
-    visual_needs: List[Dict[str, Any]] = Field(default_factory=list)
-    expected_blocks: List[str] = Field(default_factory=list)
-    pending_subtasks: List[str] = Field(default_factory=list)
-    revision_notes: List[str] = Field(default_factory=list)
-    meta: Dict[str, Any] = Field(default_factory=dict)
 
 
 class SectionInstructionList(ArtifactModel):
