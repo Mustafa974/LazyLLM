@@ -1,7 +1,7 @@
 import tempfile
 from copy import copy
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -16,6 +16,8 @@ from lazyllm.tools.writer.data_models import (
     TargetDocument,
     VisualInstruction,
     VisualPlan,
+    WriterBlock,
+    WriterDocument,
     WritingContext,
     WritingTask,
 )
@@ -195,6 +197,48 @@ def test_generate_short_visual_plan_retries_invalid_strategy_inside_structured_c
     assert visual_plan.instructions[0].meta['placement_hint'] == '分析降价原因之后插入'
 
 
+def test_short_visual_plan_trace_records_raw_response_and_validation_failure():
+    responses = iter([
+        'not-json',
+        '{"instructions": []}',
+    ])
+
+    def model(_prompt):
+        return next(responses)
+
+    tool = WriterPlanningTools(llm=object())
+    with (
+        patch.object(tool, '_build_structured_llm', return_value=model) as build_model,
+        patch('lazyllm.tools.writer.tools.base.start_span', side_effect=['span-1', 'span-2']) as start,
+        patch('lazyllm.tools.writer.tools.base.set_span_output') as set_output,
+        patch('lazyllm.tools.writer.tools.base.set_span_attributes') as set_attributes,
+        patch('lazyllm.tools.writer.tools.base.set_span_error') as set_error,
+        patch('lazyllm.tools.writer.tools.base.finish_span') as finish,
+    ):
+        result = tool._call_llm_structured(
+            'visual prompt',
+            VisualPlan,
+            trace_label='short_visual_plan',
+        )
+
+    assert result.instructions == []
+    build_model.assert_called_once_with(
+        ANY,
+        stream_output=False,
+        apply_formatter=False,
+    )
+    assert start.call_count == 2
+    assert set_output.call_args_list[0].args == ('span-1', 'not-json')
+    assert set_output.call_args_list[1].args == ('span-2', '{"instructions": []}')
+    assert set_error.call_count == 1
+    assert set_error.call_args.args[0] == 'span-1'
+    assert finish.call_args_list[0].args == ('span-1',)
+    assert finish.call_args_list[1].args == ('span-2',)
+    recorded_attributes = [call.args[1] for call in set_attributes.call_args_list]
+    assert any(attrs.get('writer.structured.failure_stage') == 'validation' for attrs in recorded_attributes)
+    assert any(attrs.get('writer.structured.instruction_count') == 0 for attrs in recorded_attributes)
+
+
 def test_generate_short_document_has_one_title_and_no_section_headings():
     task, context, plan = _short_inputs()
     plan.content_ref = ContentRef(document_root=True)
@@ -237,6 +281,145 @@ def test_stream_short_document_emits_title_and_complete_flat_document():
     assert preview == '# 新能源汽车降价背后的市场变化\n\n第一段。\n\n第二段。\n'
     assert markdown == preview
     assert '\n## ' not in markdown
+
+
+def test_generate_short_document_ir_saves_flat_editable_lmd():
+    task, context, plan = _short_inputs()
+    task.output = {'representation': 'ir'}
+    plan.content_ref = ContentRef(document_root=True)
+    plan.section_title = task.target_document.title
+    plan.meta['representation'] = 'ir'
+    model_document = WriterDocument(
+        document_id='model-document',
+        title='模型标题',
+        stage='draft',
+        blocks=[WriterBlock(
+            node_id='paragraph-1',
+            type='paragraph',
+            content='新能源汽车降价降低了消费者的购车门槛。',
+        )],
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        tool = WriterDraftingTools(artifact_store=directory)
+        with patch.object(tool, '_call_llm_structured', return_value=model_document):
+            result = tool.generate_short_document(
+                task=task,
+                short_writing_plan=plan,
+                context=context,
+            )
+        document = load_artifact_json(result['artifact_path'], WriterDocument)
+
+    assert Path(result['artifact_path']).suffix == '.lmd'
+    assert document.title == task.target_document.title
+    assert document.ui_editable is True
+    assert document.blocks[0].type == 'paragraph'
+    assert all(block.type != 'heading' for block in document.iter_blocks())
+    assert result['metadata']['extra']['representation'] == 'ir'
+    assert result['metadata']['extra']['structure_mode'] == 'flat'
+
+
+def test_stream_short_document_ir_previews_markdown_and_returns_writer_document():
+    task, context, plan = _short_inputs()
+    task.output = {'representation': 'ir'}
+    plan.content_ref = ContentRef(document_root=True)
+    plan.section_title = task.target_document.title
+    plan.meta['representation'] = 'ir'
+    model_document = WriterDocument(
+        document_id='model-document',
+        title='模型标题',
+        stage='draft',
+        blocks=[WriterBlock(
+            node_id='paragraph-1',
+            type='paragraph',
+            content='新能源汽车降价降低了消费者的购车门槛。',
+        )],
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        tool = WriterDraftingTools(artifact_store=directory)
+        with (
+            patch.object(tool, '_call_llm_structured', return_value=model_document),
+            tool.stream_short_document(
+                task=task,
+                short_writing_plan=plan,
+                context=context,
+                idle_timeout=1,
+            ) as stream,
+        ):
+            preview = ''.join(stream)
+            result = stream.result()
+        document = load_artifact_json(result['artifact_path'], WriterDocument)
+
+    assert preview == (
+        '# 新能源汽车降价背后的市场变化\n\n'
+        '新能源汽车降价降低了消费者的购车门槛。\n'
+    )
+    assert document.title == task.target_document.title
+    assert all(block.type != 'heading' for block in document.iter_blocks())
+
+
+def test_generate_short_document_ir_binds_resolved_visual_asset():
+    task, context, plan = _short_inputs()
+    task.output = {'representation': 'ir'}
+    plan.content_ref = ContentRef(document_root=True)
+    plan.section_title = task.target_document.title
+    plan.meta['representation'] = 'ir'
+    visual_plan = VisualPlan(instructions=[VisualInstruction(
+        need_id='visual-document-1',
+        content_ref=ContentRef(document_root=True),
+        visual_type='image',
+        purpose='展示消费者购车决策因素',
+        required=True,
+        meta={'placement_hint': '分析消费者机会之后'},
+    )])
+    media = MediaAssetLibrary(
+        library_id='media-short-ir',
+        assets={'asset-1': MediaAsset(
+            media_asset_id='asset-1',
+            asset_type='generated_image',
+            source_type='image_generation',
+            local_path='/tmp/short-ir-visual.png',
+        )},
+        visual_need_asset_ids={'visual-document-1': ['asset-1']},
+    )
+    model_document = WriterDocument(
+        document_id='model-document',
+        title=plan.section_title,
+        stage='draft',
+        blocks=[
+            WriterBlock(
+                node_id='paragraph-1',
+                type='paragraph',
+                content='消费者需要综合比较购车成本和后续服务。',
+            ),
+            WriterBlock(
+                node_id='visual-document-1',
+                type='image',
+                content='购车决策因素',
+            ),
+        ],
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        tool = WriterDraftingTools(artifact_store=directory)
+        with patch.object(tool, '_call_llm_structured', return_value=model_document) as mocked:
+            result = tool.generate_short_document(
+                task=task,
+                short_writing_plan=plan,
+                context=context,
+                visual_plan=visual_plan,
+                media_assets=media,
+            )
+        document = load_artifact_json(result['artifact_path'], WriterDocument)
+
+    image = next(block for block in document.iter_blocks() if block.type == 'image')
+    assert image.references == [{
+        'type': 'media_asset',
+        'id': 'asset-1',
+        'path': '/tmp/short-ir-visual.png',
+    }]
+    assert 'asset-1' in mocked.call_args.args[0]
 
 
 def test_generate_short_document_places_only_resolved_planned_visuals():

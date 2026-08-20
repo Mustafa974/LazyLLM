@@ -235,8 +235,16 @@ Target H2 sections:
 GENERATE_SHORT_VISUAL_PLAN_PROMPT = '''Generate a visual plan for one flat short article.
 
 Requirements:
-- Return a VisualPlan object. Return an empty instructions list when the user forbids visuals or no
-  visual materially improves the article.
+- Return a VisualPlan object.
+- An explicit user requirement that the article contain any image, illustration, chart, table, diagram,
+  or other visual has highest priority. In that case, instructions MUST NOT be empty; never return an empty
+  object or an empty instructions list. Create enough instructions to satisfy the requested visual content
+  and count, and mark every explicitly required instruction with required=true.
+- Treat restrictions on the visual source separately from whether a visual is required. For example,
+  "do not use uploaded images" still requires a non-empty plan when the user asks for a generated image.
+  When the user explicitly asks the system to generate an image, set preferred_strategy=image_generation.
+- Return an empty instructions list only when the user forbids visuals, or when the user has not explicitly
+  required any visual and no visual materially improves the article.
 - Use the short writing plan to decide what each visual communicates and where it naturally belongs.
 - Each content_ref must contain only document_root=true. Do not use node_id, heading_path, or placeholder_id.
 - visual_type must be image, chart, table, or diagram.

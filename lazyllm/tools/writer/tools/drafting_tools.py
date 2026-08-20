@@ -4,7 +4,7 @@ import re
 from typing import Any, Dict, List, Optional
 
 from .base import WriterToolBase
-from .stream_tools import DraftIRStream, DraftMarkdownStream, resolve_stream_idle_timeout
+from .stream_tools import DraftIRStream, DraftMarkdownStream, OutlineIRStream, resolve_stream_idle_timeout
 from ..data_models.context import WritingContext
 from ..data_models.multimodal import MediaAssetLibrary, VisualPlan
 from ..data_models.task import WritingTask
@@ -19,8 +19,10 @@ from ..numbering import (
 from ..prompts import (
     CONDENSE_DRAFT_SECTION_MARKDOWN_PROMPT,
     CONDENSE_DRAFT_SECTION_PROMPT,
+    CONDENSE_SHORT_DOCUMENT_IR_PROMPT,
     GENERATE_DRAFT_SECTION_MARKDOWN_PROMPT,
     GENERATE_DRAFT_SECTION_PROMPT,
+    GENERATE_SHORT_DOCUMENT_IR_PROMPT,
     GENERATE_SHORT_DOCUMENT_MARKDOWN_PROMPT,
 )
 from ..utils import (
@@ -92,6 +94,17 @@ class WriterDraftingTools(WriterToolBase):
         writing_task = self._unified_model(task, WritingTask)
         plan = self._unified_model(short_writing_plan, ShortWritingPlan)
         writing_context = self._unified_model(context, WritingContext)
+        if self._short_representation(plan) == 'ir':
+            with self.stream_short_document_ir(
+                task=writing_task,
+                short_writing_plan=plan,
+                context=writing_context,
+                visual_plan=visual_plan,
+                media_assets=media_assets,
+            ) as stream:
+                for _ in stream:
+                    pass
+                return stream.result()
         self._validate_short_writing_plan(plan)
         short_visuals = self._short_document_visuals(visual_plan, media_assets)
         prompt = self._short_document_prompt(writing_task, plan, writing_context, short_visuals)
@@ -110,9 +123,18 @@ class WriterDraftingTools(WriterToolBase):
         media_assets: Any = None,
         *,
         idle_timeout: Optional[float] = None,
-    ) -> DraftMarkdownStream:
+    ) -> DraftMarkdownStream | OutlineIRStream:
         writing_task = self._unified_model(task, WritingTask)
         plan = self._unified_model(short_writing_plan, ShortWritingPlan)
+        if self._short_representation(plan) == 'ir':
+            return self.stream_short_document_ir(
+                task=writing_task,
+                short_writing_plan=plan,
+                context=context,
+                visual_plan=visual_plan,
+                media_assets=media_assets,
+                idle_timeout=idle_timeout,
+            )
         writing_context = self._unified_model(context, WritingContext)
         self._validate_short_writing_plan(plan)
         short_visuals = self._short_document_visuals(visual_plan, media_assets)
@@ -133,6 +155,74 @@ class WriterDraftingTools(WriterToolBase):
             prefix=prefix,
             idle_timeout=self._draft_stream_idle_timeout(idle_timeout),
             label='Short document Markdown',
+        )
+
+    def stream_short_document_ir(
+        self,
+        task: Any,
+        short_writing_plan: Any,
+        context: Any,
+        visual_plan: Any = None,
+        media_assets: Any = None,
+        *,
+        idle_timeout: Optional[float] = None,
+    ) -> OutlineIRStream:
+        writing_task = self._unified_model(task, WritingTask)
+        plan = self._unified_model(short_writing_plan, ShortWritingPlan)
+        writing_context = self._unified_model(context, WritingContext)
+        self._validate_short_writing_plan(plan, representation='ir')
+        short_visuals = self._short_document_ir_visuals(visual_plan, media_assets)
+        prompt = GENERATE_SHORT_DOCUMENT_IR_PROMPT.format(
+            task_json=to_prompt_json(writing_task),
+            short_writing_plan_json=to_prompt_json(plan),
+            context_json=to_prompt_json(writing_context),
+            short_visuals_json=to_prompt_json(short_visuals),
+        )
+        document_id = f'draft-document-{writing_context.context_id}'
+
+        def normalize(document: WriterDocument) -> WriterDocument:
+            return self._normalize_short_ir_document(
+                document,
+                plan,
+                writing_context,
+                visual_plan,
+                media_assets,
+                document_id=document_id,
+            )
+
+        def finalize(document: WriterDocument) -> dict:
+            result = self._save_artifacts(
+                {'draft_document': document},
+                step_name='generate_short_document',
+                primary_key='draft_document',
+                context_key=None,
+                summary='Generated a complete short document as Writer IR.',
+                counts={
+                    'draft_sections': 0,
+                    'draft_blocks': len(list(document.iter_blocks())),
+                    'characters': self._short_ir_prose_chars(document),
+                },
+                extra={
+                    'representation': 'ir',
+                    'structure_mode': 'flat',
+                    'task_id': writing_task.task_id,
+                    'context_id': writing_context.context_id,
+                    'instruction_id': plan.instruction_id,
+                    'outline_title': document.title,
+                },
+            )
+            return result.model_dump()
+
+        return OutlineIRStream(
+            call=lambda sink: self._call_llm_structured(
+                prompt,
+                WriterDocument,
+                stream_output={'_stream_sink': sink},
+            ),
+            normalize=normalize,
+            finalize=finalize,
+            idle_timeout=self._draft_stream_idle_timeout(idle_timeout),
+            preview_title=plan.section_title,
         )
 
     def stream_draft_section(
@@ -254,16 +344,189 @@ class WriterDraftingTools(WriterToolBase):
         return self._save_ir_draft_section(block, result_extra, media_assets)
 
     @staticmethod
-    def _validate_short_writing_plan(plan: ShortWritingPlan) -> None:
+    def _short_representation(plan: ShortWritingPlan) -> str:
+        representation = str(plan.meta.get('representation', 'markdown')).strip().lower()
+        if representation not in {'markdown', 'ir'}:
+            raise ValueError(
+                "Short document representation must be 'markdown' or 'ir'.",
+            )
+        return representation
+
+    @classmethod
+    def _validate_short_writing_plan(
+        cls,
+        plan: ShortWritingPlan,
+        *,
+        representation: str = 'markdown',
+    ) -> None:
         ref = plan.content_ref
         if not ref.document_root or ref.node_id or ref.heading_path or ref.placeholder_id:
             raise ValueError('Short writing plan must target only content_ref.document_root.')
-        if plan.meta.get('representation', 'markdown') != 'markdown':
-            raise ValueError('Short document generation currently requires Markdown representation.')
+        if cls._short_representation(plan) != representation:
+            raise ValueError(
+                f'Short document generation requires {representation!r} representation.',
+            )
         if not plan.section_title.strip():
             raise ValueError('Short writing plan requires a document title.')
         if not plan.section_goal.strip() or not plan.core_viewpoint.strip():
             raise ValueError('Short writing plan requires a goal and core viewpoint.')
+
+    def _short_document_ir_visuals(
+        self,
+        visual_plan: Any,
+        media_assets: Any,
+    ) -> List[Dict[str, Any]]:
+        plan = self._unified_optional_model(visual_plan, VisualPlan) or VisualPlan()
+        library = self._unified_optional_model(media_assets, MediaAssetLibrary)
+        visuals: List[Dict[str, Any]] = []
+        for need in plan.instructions:
+            ref = need.content_ref
+            if not ref.document_root or ref.node_id or ref.heading_path or ref.placeholder_id:
+                raise ValueError('Short visual plan must target only content_ref.document_root.')
+            asset_ids = [
+                asset_id for asset_id in (
+                    library.visual_need_asset_ids.get(need.need_id, []) if library else []
+                )
+                if library and asset_id in library.assets
+            ]
+            if not asset_ids:
+                if need.required:
+                    raise ValueError(f'Required short visual {need.need_id!r} has no resolved media.')
+                continue
+            visuals.append({
+                'need_id': need.need_id,
+                'visual_type': need.visual_type,
+                'purpose': need.purpose,
+                'required': need.required,
+                'placement_hint': str(need.meta.get('placement_hint') or ''),
+                'asset_ids': asset_ids,
+                'assets': [
+                    {
+                        'id': asset_id,
+                        'caption': library.assets[asset_id].caption,
+                        'uri': library.assets[asset_id].uri or library.assets[asset_id].local_path,
+                    }
+                    for asset_id in asset_ids
+                ],
+            })
+        return visuals
+
+    @classmethod
+    def _short_ir_prose_chars(cls, document: WriterDocument) -> int:
+        return sum(
+            cls._text_chars(block.content)
+            for block in document.iter_blocks()
+            if block.type != 'image'
+        )
+
+    def _condense_short_ir_if_needed(
+        self,
+        document: WriterDocument,
+        plan: ShortWritingPlan,
+    ) -> WriterDocument:
+        max_chars = plan.meta.get('max_chars')
+        if not isinstance(max_chars, int) or self._short_ir_prose_chars(document) <= max_chars:
+            return document
+        prompt = CONDENSE_SHORT_DOCUMENT_IR_PROMPT.format(
+            max_chars=max_chars,
+            short_writing_plan_json=to_prompt_json(plan),
+            draft_document_json=to_prompt_json(document),
+        )
+        condensed = self._call_llm_structured(prompt, WriterDocument)
+        if self._short_ir_prose_chars(condensed) > max_chars:
+            raise ValueError(
+                f'Condensed short document still exceeds max_chars={max_chars}.',
+            )
+        return condensed
+
+    def _normalize_short_ir_document(
+        self,
+        document: WriterDocument,
+        plan: ShortWritingPlan,
+        context: WritingContext,
+        visual_plan: Any,
+        media_assets: Any,
+        *,
+        document_id: str,
+    ) -> WriterDocument:
+        document = self._condense_short_ir_if_needed(document, plan)
+        document.document_id = document_id
+        document.stage = 'draft'
+        document.title = strip_heading_numbering(plan.section_title.strip())
+        document.ui_editable = True
+        document.metadata = {
+            **document.metadata,
+            'source': 'generate_short_document',
+            'context_id': context.context_id,
+            'instruction_id': plan.instruction_id,
+            'structure_mode': 'flat',
+        }
+        needs = {
+            need.need_id: need
+            for need in (self._unified_optional_model(visual_plan, VisualPlan)
+                         or VisualPlan()).instructions
+        }
+        library = self._unified_optional_model(media_assets, MediaAssetLibrary)
+        created_visual_ids: set[str] = set()
+        for block in document.iter_blocks():
+            block.stage = 'draft'
+            if block.type == 'heading':
+                raise ValueError('Short IR document must not contain heading blocks.')
+            if block.type != 'image':
+                continue
+            need = needs.get(block.node_id)
+            if need is None:
+                raise ValueError(
+                    f'Short IR document contains an unplanned image block {block.node_id!r}.',
+                )
+            asset_ids = [
+                asset_id for asset_id in (
+                    library.visual_need_asset_ids.get(need.need_id, []) if library else []
+                )
+                if library and asset_id in library.assets
+            ]
+            if not asset_ids:
+                if need.required:
+                    raise ValueError(
+                        f'Required short visual {need.need_id!r} has no resolved media.',
+                    )
+                continue
+            asset = library.assets[asset_ids[0]]
+            block.content = strip_caption_numbering(block.content or need.purpose)
+            block.references = [{
+                'type': 'media_asset',
+                'id': asset_ids[0],
+                **({'path': asset.uri or asset.local_path}
+                   if asset.uri or asset.local_path else {}),
+            }]
+            created_visual_ids.add(need.need_id)
+        for need in needs.values():
+            if not need.required or need.need_id in created_visual_ids:
+                continue
+            asset_ids = [
+                asset_id for asset_id in (
+                    library.visual_need_asset_ids.get(need.need_id, []) if library else []
+                )
+                if library and asset_id in library.assets
+            ]
+            if asset_ids:
+                asset = library.assets[asset_ids[0]]
+                document.blocks.append(WriterBlock(
+                    node_id=need.need_id,
+                    type='image',
+                    content=strip_caption_numbering(need.purpose),
+                    stage='draft',
+                    references=[{
+                        'type': 'media_asset',
+                        'id': asset_ids[0],
+                        **({'path': asset.uri or asset.local_path}
+                           if asset.uri or asset.local_path else {}),
+                    }],
+                ))
+                created_visual_ids.add(need.need_id)
+        if self._short_ir_prose_chars(document) <= 0:
+            raise ValueError('Short IR document body must not be empty.')
+        return document
 
     @staticmethod
     def _short_document_prompt(

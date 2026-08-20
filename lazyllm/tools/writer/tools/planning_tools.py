@@ -287,7 +287,11 @@ class WriterPlanningTools(WriterToolBase):
             context_json=to_prompt_json(writing_context),
         )
         visual_plan = self._normalize_short_visual_plan(
-            self._call_llm_structured(prompt, VisualPlan),
+            self._call_llm_structured(
+                prompt,
+                VisualPlan,
+                trace_label='short_visual_plan',
+            ),
         )
         return self._save_artifacts(
             {'visual_plan': visual_plan},
@@ -296,7 +300,10 @@ class WriterPlanningTools(WriterToolBase):
             context_key=None,
             summary='Generated a visual plan for a flat short article.',
             counts={'visual_instructions': len(visual_plan.instructions)},
-            extra={'representation': 'markdown', 'document_root': True},
+            extra={
+                'representation': writing_plan.meta.get('representation', 'markdown'),
+                'document_root': True,
+            },
             artifact_meta={
                 'task_id': writing_task.task_id,
                 'context_id': writing_context.context_id,
