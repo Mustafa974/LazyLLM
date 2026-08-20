@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Literal, Optional
 from .base import WriterToolBase
 from .stream_tools import DraftPreviewStream, build_outline_stream
 from ..data_models.context import WritingContext
-from ..data_models.multimodal import VisualInstruction, VisualPlan
+from ..data_models.multimodal import VisualPlan
 from ..data_models.resource import ResourceProfile
 from ..data_models.task import WritingTask
 from ..data_models.writer_ir import ContentRef, WriterBlock, WriterDocument
@@ -16,6 +16,7 @@ from ..prompts import (
     GENERATE_REWRITE_OUTLINE_PROMPT,
     GENERATE_REWRITE_SECTION_INSTRUCTIONS_PROMPT,
     GENERATE_SECTION_INSTRUCTIONS_PROMPT,
+    GENERATE_SHORT_VISUAL_PLAN_PROMPT,
     GENERATE_SHORT_WRITING_PLAN_PROMPT,
     GENERATE_VISUAL_PLAN_MARKDOWN_PROMPT,
     GENERATE_VISUAL_PLAN_PROMPT,
@@ -48,6 +49,7 @@ class WriterPlanningTools(WriterToolBase):
         'generate_rewrite_outline',
         'generate_rewrite_section_instructions',
         'generate_section_instructions',
+        'generate_short_visual_plan',
         'generate_short_writing_plan',
     ]
 
@@ -270,6 +272,38 @@ class WriterPlanningTools(WriterToolBase):
             },
         ).model_dump()
 
+    def generate_short_visual_plan(
+        self,
+        task: Any,
+        short_writing_plan: Any,
+        context: Any,
+    ) -> dict:
+        writing_task = self._unified_model(task, WritingTask)
+        writing_plan = self._unified_model(short_writing_plan, ShortWritingPlan)
+        writing_context = self._unified_model(context, WritingContext)
+        prompt = GENERATE_SHORT_VISUAL_PLAN_PROMPT.format(
+            task_json=to_prompt_json(writing_task),
+            short_writing_plan_json=to_prompt_json(writing_plan),
+            context_json=to_prompt_json(writing_context),
+        )
+        visual_plan = self._normalize_short_visual_plan(
+            self._call_llm_structured(prompt, VisualPlan),
+        )
+        return self._save_artifacts(
+            {'visual_plan': visual_plan},
+            step_name='generate_short_visual_plan',
+            primary_key='visual_plan',
+            context_key=None,
+            summary='Generated a visual plan for a flat short article.',
+            counts={'visual_instructions': len(visual_plan.instructions)},
+            extra={'representation': 'markdown', 'document_root': True},
+            artifact_meta={
+                'task_id': writing_task.task_id,
+                'context_id': writing_context.context_id,
+                'short_writing_plan_id': writing_plan.instruction_id,
+            },
+        ).model_dump()
+
     def generate_visual_plan(self, task: Any, outline: Any, context: Any) -> dict:
         writing_task = self._unified_model(task, WritingTask)
         writing_outline = self._unified_document(outline)
@@ -347,7 +381,7 @@ class WriterPlanningTools(WriterToolBase):
             for reference in plan.references
             if isinstance(reference, dict) and reference.get('id') in valid_reference_ids
         ]
-        plan.visual_needs = cls._normalize_short_visual_needs(plan.visual_needs)
+        plan.visual_needs = []
         cls._normalize_fact_constraints(plan, bool(context.facts))
 
         representation = cls._resolve_representation(task, None)
@@ -365,32 +399,22 @@ class WriterPlanningTools(WriterToolBase):
         return plan
 
     @staticmethod
-    def _normalize_short_visual_needs(visual_needs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        normalized: List[Dict[str, Any]] = []
-        for index, value in enumerate(visual_needs, start=1):
-            if not isinstance(value, dict):
-                raise ValueError('Short writing plan visual_needs must contain objects.')
-            raw = dict(value)
-            raw.pop('need_id', None)
-            raw.pop('content_ref', None)
-            raw_meta = raw.pop('meta', {})
-            meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
-            placement_hint = str(raw.pop('placement_hint', '') or meta.get('placement_hint') or '').strip()
-            if placement_hint:
-                meta['placement_hint'] = placement_hint
-            need = VisualInstruction.model_validate({
-                **raw,
-                'need_id': f'visual-document-{index}',
-                'content_ref': {'document_root': True},
-                'meta': meta,
-            })
+    def _normalize_short_visual_plan(visual_plan: VisualPlan) -> VisualPlan:
+        for index, need in enumerate(visual_plan.instructions, start=1):
+            ref = need.content_ref
+            if ref.node_id or ref.heading_path or ref.placeholder_id or not ref.document_root:
+                raise ValueError('Short visual plan must target document_root only.')
             need.purpose = need.purpose.strip()
             if not need.purpose:
                 raise ValueError(f'Short visual need {index} has an empty purpose.')
-            data = need.model_dump(exclude_defaults=True)
-            data['required'] = need.required
-            normalized.append(data)
-        return normalized
+            placement_hint = str(need.meta.get('placement_hint') or '').strip()
+            if placement_hint:
+                need.meta['placement_hint'] = placement_hint
+            else:
+                need.meta.pop('placement_hint', None)
+            need.need_id = f'visual-document-{index}'
+            need.content_ref = ContentRef(document_root=True)
+        return visual_plan
 
     def generate_section_instructions(
         self,

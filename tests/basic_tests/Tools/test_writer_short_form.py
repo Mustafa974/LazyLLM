@@ -92,17 +92,8 @@ def test_generate_short_writing_plan_targets_document_root_and_keeps_valid_refer
     task, context, model_plan = _short_inputs()
     model_plan.visual_needs = [
         {
-            'need_id': 'model-invented-id',
-            'content_ref': {'node_id': 'model-invented-target'},
             'visual_type': 'image',
-            'purpose': '  展示降价原因和消费者影响  ',
-            'required': False,
-            'placement_hint': '分析消费者机会之后',
-        },
-        {
-            'visual_type': 'diagram',
-            'purpose': '说明购车决策因素',
-            'required': True,
+            'purpose': '视觉计划不应保留在短文写作计划中',
         },
     ]
     with tempfile.TemporaryDirectory() as directory:
@@ -112,32 +103,96 @@ def test_generate_short_writing_plan_targets_document_root_and_keeps_valid_refer
         plan = load_artifact_json(result['artifact_path'], ShortWritingPlan)
 
     prompt = mocked.call_args.args[0]
-    assert 'materially improves' in prompt
-    assert 'Do not impose a visual' in prompt
+    assert 'Visuals are planned separately' in prompt
     assert plan.instruction_id == 'ctx-short-short-writing-plan'
     assert plan.content_ref == ContentRef(document_root=True)
     assert plan.section_title == '新能源汽车降价背后的市场变化'
     assert plan.core_viewpoint == model_plan.core_viewpoint
     assert plan.references == [{'id': 'fact-1'}]
-    assert plan.visual_needs == [
-        {
-            'need_id': 'visual-document-1',
-            'content_ref': {'document_root': True},
-            'visual_type': 'image',
-            'purpose': '展示降价原因和消费者影响',
-            'required': False,
-            'meta': {'placement_hint': '分析消费者机会之后'},
-        },
-        {
-            'need_id': 'visual-document-2',
-            'content_ref': {'document_root': True},
-            'visual_type': 'diagram',
-            'purpose': '说明购车决策因素',
-            'required': True,
-        },
-    ]
+    assert plan.visual_needs == []
     assert plan.meta['target_chars'] == 700
     assert plan.meta['max_chars'] == 800
+
+
+def test_generate_short_visual_plan_uses_visual_plan_schema_and_document_root():
+    task, context, plan = _short_inputs()
+    model_plan = VisualPlan(instructions=[VisualInstruction(
+        need_id='model-generated-id',
+        content_ref=ContentRef(document_root=True),
+        visual_type='image',
+        purpose='  展示降价原因和消费者影响  ',
+        preferred_strategy=None,
+        required=True,
+        meta={'placement_hint': '  分析消费者机会之后  '},
+    )])
+
+    with tempfile.TemporaryDirectory() as directory:
+        tool = WriterPlanningTools(artifact_store=directory)
+        with patch.object(tool, '_call_llm_structured', return_value=model_plan) as mocked:
+            result = tool.generate_short_visual_plan(
+                task=task,
+                short_writing_plan=plan,
+                context=context,
+            )
+        visual_plan = load_artifact_json(result['artifact_path'], VisualPlan)
+
+    prompt, schema = mocked.call_args.args
+    assert schema is VisualPlan
+    assert 'meta.placement_hint' in prompt
+    assert 'Never put placement guidance' in prompt
+    assert visual_plan.instructions == [VisualInstruction(
+        need_id='visual-document-1',
+        content_ref=ContentRef(document_root=True),
+        visual_type='image',
+        purpose='展示降价原因和消费者影响',
+        preferred_strategy=None,
+        required=True,
+        meta={'placement_hint': '分析消费者机会之后'},
+    )]
+
+
+def test_generate_short_visual_plan_retries_invalid_strategy_inside_structured_call():
+    task, context, plan = _short_inputs()
+    responses = iter([
+        {
+            'instructions': [{
+                'need_id': 'visual-1',
+                'content_ref': {'document_root': True},
+                'visual_type': 'image',
+                'purpose': '展示消费者购车决策因素',
+                'preferred_strategy': '分析降价原因之后插入',
+            }],
+        },
+        {
+            'instructions': [{
+                'need_id': 'visual-1',
+                'content_ref': {'document_root': True},
+                'visual_type': 'image',
+                'purpose': '展示消费者购车决策因素',
+                'preferred_strategy': None,
+                'meta': {'placement_hint': '分析降价原因之后插入'},
+            }],
+        },
+    ])
+    calls = []
+
+    def model(_prompt):
+        calls.append('call')
+        return next(responses)
+
+    with tempfile.TemporaryDirectory() as directory:
+        tool = WriterPlanningTools(llm=object(), artifact_store=directory)
+        with patch.object(tool, '_build_structured_llm', return_value=model):
+            result = tool.generate_short_visual_plan(
+                task=task,
+                short_writing_plan=plan,
+                context=context,
+            )
+        visual_plan = load_artifact_json(result['artifact_path'], VisualPlan)
+
+    assert calls == ['call', 'call']
+    assert visual_plan.instructions[0].preferred_strategy is None
+    assert visual_plan.instructions[0].meta['placement_hint'] == '分析降价原因之后插入'
 
 
 def test_generate_short_document_has_one_title_and_no_section_headings():

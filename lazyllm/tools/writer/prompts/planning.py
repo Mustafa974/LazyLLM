@@ -232,6 +232,35 @@ Target H2 sections:
 '''
 
 
+GENERATE_SHORT_VISUAL_PLAN_PROMPT = '''Generate a visual plan for one flat short article.
+
+Requirements:
+- Return a VisualPlan object. Return an empty instructions list when the user forbids visuals or no
+  visual materially improves the article.
+- Use the short writing plan to decide what each visual communicates and where it naturally belongs.
+- Each content_ref must contain only document_root=true. Do not use node_id, heading_path, or placeholder_id.
+- visual_type must be image, chart, table, or diagram.
+- preferred_strategy must be null or exactly one of web_search, kb_search, image_generation, or code_render.
+  Leave it null when an uploaded or otherwise available input image should be reused.
+- Put natural-language placement guidance only in meta.placement_hint. Never put placement guidance in
+  preferred_strategy.
+- purpose must state what the visual communicates for the complete article.
+- Set required=true only when the user explicitly requires that visual.
+- Do not impose a visual count limit; decide from the requested content, length, and explicit requirements.
+- Do not generate asset IDs, paths, URLs, captions, placeholders, or upload details.
+- Keep the plan selective enough to satisfy writing_task.constraints.target_chars and max_chars.
+
+Writing task:
+{task_json}
+
+Short writing plan:
+{short_writing_plan_json}
+
+Writing context:
+{context_json}
+'''
+
+
 GENERATE_SECTION_INSTRUCTIONS_PROMPT = '''Generate section-level writing instructions from the outline and writing context.
 
 Requirements:
@@ -316,13 +345,7 @@ Requirements:
 - fact_constraints contains only factual statements actually present in the writing context.
 - references identifies relevant context facts or resources and must not invent identifiers.
 - style_constraints includes the requested genre, audience, tone, point of view, and style when applicable.
-- visual_needs contains a visual only when the user explicitly requires it or it materially improves
-  the complete article. Return an empty list when the user forbids visuals or no visual is useful.
-- Each visual_needs item contains visual_type, purpose, required, optional preferred_strategy, and
-  meta.placement_hint describing the natural paragraph boundary for insertion. Do not impose a visual
-  count limit; decide from the requested content, length, and explicit user requirements.
-- Set required=true only when the user explicitly requires that visual. Do not generate need IDs,
-  content references, asset IDs, paths, URLs, captions, placeholders, or upload details.
+- Keep visual_needs empty. Visuals are planned separately with a strongly typed VisualPlan.
 - expected_blocks is a concise content-order plan for continuous prose. Its entries are internal coverage
   cues, not visible headings, separate generations, or minimum paragraph counts.
 - Do not create relation_constraints, cross-references, section links, chapters, or subheadings.
