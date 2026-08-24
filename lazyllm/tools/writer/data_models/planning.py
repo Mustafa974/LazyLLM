@@ -8,7 +8,7 @@ from ..utils.artifact import ArtifactModel
 from .writer_ir import ContentRef
 
 
-class _WritingInstructionBase(BaseModel):
+class WritingInstructionBase(BaseModel):
     instruction_id: str
     content_ref: ContentRef
     section_title: str
@@ -24,11 +24,11 @@ class _WritingInstructionBase(BaseModel):
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
-class SectionInstruction(_WritingInstructionBase):
+class SectionInstruction(WritingInstructionBase):
     relation_constraints: List[str] = Field(default_factory=list)
 
 
-class ShortWritingPlan(_WritingInstructionBase):
+class ShortWritingPlan(WritingInstructionBase):
     core_viewpoint: str
 
 
