@@ -367,7 +367,7 @@ def test_stream_short_document_ir_previews_markdown_and_returns_writer_document(
         (None, 'https://example.com/short-ir-visual.png'),
     ],
 )
-def test_generate_short_document_ir_prefers_local_path_for_resolved_visual_asset(
+def test_generate_short_document_ir_binds_asset_without_exposing_paths_to_model(
     model_has_image,
     local_path,
     expected_path,
@@ -393,6 +393,7 @@ def test_generate_short_document_ir_prefers_local_path_for_resolved_visual_asset
             source_type='image_generation',
             uri='https://example.com/short-ir-visual.png',
             local_path=local_path,
+            caption='购车决策因素示意图',
         )},
         visual_need_asset_ids={'visual-document-1': ['asset-1']},
     )
@@ -433,9 +434,9 @@ def test_generate_short_document_ir_prefers_local_path_for_resolved_visual_asset
         'path': expected_path,
     }]
     assert 'asset-1' in mocked.call_args.args[0]
-    assert expected_path in mocked.call_args.args[0]
-    if local_path:
-        assert 'https://example.com/short-ir-visual.png' not in mocked.call_args.args[0]
+    assert '购车决策因素示意图' in mocked.call_args.args[0]
+    assert '/tmp/short-ir-visual.png' not in mocked.call_args.args[0]
+    assert 'https://example.com/short-ir-visual.png' not in mocked.call_args.args[0]
 
 
 def test_generate_short_document_places_only_resolved_planned_visuals():

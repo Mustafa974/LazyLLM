@@ -404,7 +404,6 @@ class WriterDraftingTools(WriterToolBase):
                     {
                         'id': asset_id,
                         'caption': library.assets[asset_id].caption,
-                        'uri': library.assets[asset_id].local_path or library.assets[asset_id].uri,
                     }
                     for asset_id in asset_ids
                 ],
