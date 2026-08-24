@@ -359,7 +359,19 @@ def test_stream_short_document_ir_previews_markdown_and_returns_writer_document(
     assert all(block.type != 'heading' for block in document.iter_blocks())
 
 
-def test_generate_short_document_ir_binds_resolved_visual_asset():
+@pytest.mark.parametrize('model_has_image', [True, False])
+@pytest.mark.parametrize(
+    ('local_path', 'expected_path'),
+    [
+        ('/tmp/short-ir-visual.png', '/tmp/short-ir-visual.png'),
+        (None, 'https://example.com/short-ir-visual.png'),
+    ],
+)
+def test_generate_short_document_ir_prefers_local_path_for_resolved_visual_asset(
+    model_has_image,
+    local_path,
+    expected_path,
+):
     task, context, plan = _short_inputs()
     task.output = {'representation': 'ir'}
     plan.content_ref = ContentRef(document_root=True)
@@ -379,26 +391,27 @@ def test_generate_short_document_ir_binds_resolved_visual_asset():
             media_asset_id='asset-1',
             asset_type='generated_image',
             source_type='image_generation',
-            local_path='/tmp/short-ir-visual.png',
+            uri='https://example.com/short-ir-visual.png',
+            local_path=local_path,
         )},
         visual_need_asset_ids={'visual-document-1': ['asset-1']},
     )
+    blocks = [WriterBlock(
+        node_id='paragraph-1',
+        type='paragraph',
+        content='消费者需要综合比较购车成本和后续服务。',
+    )]
+    if model_has_image:
+        blocks.append(WriterBlock(
+            node_id='visual-document-1',
+            type='image',
+            content='购车决策因素',
+        ))
     model_document = WriterDocument(
         document_id='model-document',
         title=plan.section_title,
         stage='draft',
-        blocks=[
-            WriterBlock(
-                node_id='paragraph-1',
-                type='paragraph',
-                content='消费者需要综合比较购车成本和后续服务。',
-            ),
-            WriterBlock(
-                node_id='visual-document-1',
-                type='image',
-                content='购车决策因素',
-            ),
-        ],
+        blocks=blocks,
     )
 
     with tempfile.TemporaryDirectory() as directory:
@@ -417,9 +430,12 @@ def test_generate_short_document_ir_binds_resolved_visual_asset():
     assert image.references == [{
         'type': 'media_asset',
         'id': 'asset-1',
-        'path': '/tmp/short-ir-visual.png',
+        'path': expected_path,
     }]
     assert 'asset-1' in mocked.call_args.args[0]
+    assert expected_path in mocked.call_args.args[0]
+    if local_path:
+        assert 'https://example.com/short-ir-visual.png' not in mocked.call_args.args[0]
 
 
 def test_generate_short_document_places_only_resolved_planned_visuals():

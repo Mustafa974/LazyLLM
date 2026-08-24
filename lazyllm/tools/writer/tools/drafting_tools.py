@@ -404,7 +404,7 @@ class WriterDraftingTools(WriterToolBase):
                     {
                         'id': asset_id,
                         'caption': library.assets[asset_id].caption,
-                        'uri': library.assets[asset_id].uri or library.assets[asset_id].local_path,
+                        'uri': library.assets[asset_id].local_path or library.assets[asset_id].uri,
                     }
                     for asset_id in asset_ids
                 ],
@@ -496,8 +496,8 @@ class WriterDraftingTools(WriterToolBase):
             block.references = [{
                 'type': 'media_asset',
                 'id': asset_ids[0],
-                **({'path': asset.uri or asset.local_path}
-                   if asset.uri or asset.local_path else {}),
+                **({'path': asset.local_path or asset.uri}
+                   if asset.local_path or asset.uri else {}),
             }]
             created_visual_ids.add(need.need_id)
         for need in needs.values():
@@ -519,8 +519,8 @@ class WriterDraftingTools(WriterToolBase):
                     references=[{
                         'type': 'media_asset',
                         'id': asset_ids[0],
-                        **({'path': asset.uri or asset.local_path}
-                           if asset.uri or asset.local_path else {}),
+                        **({'path': asset.local_path or asset.uri}
+                           if asset.local_path or asset.uri else {}),
                     }],
                 ))
                 created_visual_ids.add(need.need_id)
