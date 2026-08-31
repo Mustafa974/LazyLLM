@@ -5,6 +5,7 @@ from lazyllm.tools.tool_config_inject import (
     effective_env_value,
     get_dynamic_env_vars,
     inject_env_vars,
+    inject_tool_config,
 )
 
 
@@ -56,3 +57,13 @@ def test_effective_env_value_prefers_dynamic_over_os_environ(monkeypatch):
         assert effective_env_value('SESSION_ONLY_KEY') == 'from-session'
     finally:
         _restore_dynamic_env(old_dynamic_env)
+
+
+def test_github_tool_config_is_injected_as_dynamic_fs_auth():
+    old = lazyllm.globals.config['dynamic_fs_auth']
+    lazyllm.globals.config['dynamic_fs_auth'] = {}
+    try:
+        inject_tool_config({'github': 'github-token'})
+        assert lazyllm.globals.config['dynamic_fs_auth']['github'] == 'github-token'
+    finally:
+        lazyllm.globals.config['dynamic_fs_auth'] = old

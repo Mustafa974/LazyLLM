@@ -265,7 +265,12 @@ class WriterMultimodalTools(WriterToolBase):
                 suffix_hint=Path(parsed.path).suffix,
             )
         if parsed.scheme not in {'', 'file'}:
-            raise ValueError('image inputs must use a local file path or an HTTP(S) URL.')
+            import lazyllm.tools.fs.client as _fs_client
+            return self._materialize_image_bytes(
+                _fs_client.FS.read_bytes(uri),
+                resource,
+                suffix_hint=Path(parsed.path).suffix,
+            )
         source = Path(unquote(parsed.path) if parsed.scheme == 'file' else uri).expanduser().resolve()
         if not source.is_file():
             raise FileNotFoundError(f'image file does not exist: {source}')
