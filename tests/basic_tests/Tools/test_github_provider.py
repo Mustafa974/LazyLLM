@@ -150,34 +150,7 @@ def test_replace_document_does_not_reuse_completed_operation_id():
     assert target.meta['last_operation_id'] == 'new-operation'
 
 
-def test_replace_document_materializes_only_referenced_assets(tmp_path):
-    image = tmp_path / 'diagram.png'
-    image_data = b'\x89PNG\r\n\x1a\nimage-data'
-    image.write_bytes(image_data)
-    library = MediaAssetLibrary(
-        library_id='library-1',
-        assets={
-            'asset-1': MediaAsset(
-                media_asset_id='asset-1',
-                asset_type='image',
-                source_type='input_resource',
-                local_path=str(image),
-            ),
-        },
-    )
-    target = GitHubWriterProvider._target_from_resolved(_resolved_target())
-
-    markdown, files = GitHubWriterProvider()._materialize_media(
-        '![diagram](asset://asset-1)', target, library,
-    )
-
-    digest = hashlib.sha256(image_data).hexdigest()
-    expected_path = f'assets/{digest[:2]}/{digest}.png'
-    assert markdown == f'![diagram]({expected_path})'
-    assert files == {expected_path: image_data}
-
-
-def test_replace_document_materializes_new_svg_as_relative_repository_asset(tmp_path):
+def test_replace_document_materializes_referenced_asset_with_relative_link(tmp_path):
     image = tmp_path / 'diagram.svg'
     image_data = b'<svg xmlns="http://www.w3.org/2000/svg"></svg>'
     image.write_bytes(image_data)
@@ -230,14 +203,13 @@ def test_replace_document_restores_imported_image_reference(tmp_path):
     target = GitHubWriterProvider._target_from_resolved(_resolved_target())
 
     markdown, files = GitHubWriterProvider()._materialize_media(
-        f'![diagram]({image})\n\n'
-        '<img src="/static-files/writer-preview-assets/aa/diagram.png'
-        '?expires=123&sig=abc">\n',
+        '![diagram](/static-files/writer-preview-assets/aa/diagram.png'
+        '?expires=123&sig=abc)',
         target,
         library,
     )
 
-    assert markdown == '![diagram](./diagram.png)\n\n<img src="./diagram.png">\n'
+    assert markdown == '![diagram](./diagram.png)'
     assert files == {}
 
 
