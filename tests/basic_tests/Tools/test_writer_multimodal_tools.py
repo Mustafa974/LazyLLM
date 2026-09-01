@@ -7,6 +7,7 @@ import pytest
 
 from lazyllm.tools.fs.supplier.feishu import FeishuFS
 from lazyllm.tools.writer.data_models import (
+    InputResource,
     MediaAssetLibrary,
     WriterBlock,
     WriterDocument,
@@ -18,6 +19,10 @@ from lazyllm.tools.writer.utils import load_artifact_json
 
 _PNG_BYTES = base64.b64decode(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+)
+_SVG_BYTES = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="12">'
+    b'<rect width="24" height="12"/></svg>'
 )
 
 
@@ -49,6 +54,69 @@ def test_collect_available_media_downloads_markdown_images(tmp_path):
     assert Path(asset.local_path).is_file()
     assert any(resource.get('uri') == asset.uri for resource in resources)
     assert result['metadata']['warnings'] == []
+
+
+def test_collect_available_media_preserves_provider_source_reference(tmp_path):
+    tool = WriterMultimodalTools(artifact_store=str(tmp_path / 'media-store'))
+    task = WritingTask(
+        task_id='task-provider-image',
+        query='复用 GitHub 原图',
+        task_type='write',
+        inputs=[InputResource(
+            resource_id='github-image',
+            resource_type='image',
+            uri='githubrepo:/acme/docs/diagram.png?ref=main',
+            meta={
+                'provider': 'github',
+                'referenced_from': 'githubrepo:/acme/docs/guide.md?ref=main',
+                'source_reference': './diagram.png',
+            },
+        )],
+    )
+
+    with patch(
+        'lazyllm.tools.fs.client.FS.read_bytes',
+        return_value=_PNG_BYTES,
+    ):
+        result = tool.collect_available_media(task=task)
+
+    library = load_artifact_json(result['artifact_path'], MediaAssetLibrary)
+    asset = next(iter(library.assets.values()))
+    assert asset.meta['provider'] == 'github'
+    assert asset.meta['referenced_from'].endswith('/guide.md?ref=main')
+    assert asset.meta['source_reference'] == './diagram.png'
+
+
+def test_collect_available_media_materializes_github_svg(tmp_path):
+    tool = WriterMultimodalTools(artifact_store=str(tmp_path / 'media-store'))
+    task = WritingTask(
+        task_id='task-provider-svg',
+        query='复用 GitHub SVG',
+        task_type='write',
+        inputs=[InputResource(
+            resource_id='github-svg',
+            resource_type='image',
+            uri='githubrepo:/acme/docs/assets/diagram.svg?ref=main',
+            mime_type='image/svg+xml',
+            title='diagram.svg',
+            meta={
+                'provider': 'github',
+                'source_reference': 'assets/diagram.svg',
+            },
+        )],
+    )
+
+    with patch('lazyllm.tools.fs.client.FS.read_bytes', return_value=_SVG_BYTES):
+        result = tool.collect_available_media(task=task)
+
+    library = load_artifact_json(result['artifact_path'], MediaAssetLibrary)
+    asset = next(iter(library.assets.values()))
+    assert Path(asset.local_path).suffix == '.svg'
+    assert Path(asset.local_path).read_bytes() == _SVG_BYTES
+    assert asset.meta['mime_type'] == 'image/svg+xml'
+    assert asset.meta['width'] == 24
+    assert asset.meta['height'] == 12
+    assert asset.meta['source_reference'] == 'assets/diagram.svg'
 
 
 def test_external_image_download_streams_valid_image_bytes():

@@ -57,6 +57,9 @@ def _image_suffix(data: bytes) -> str:
         return '.tiff'
     if len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
         return '.webp'
+    prefix = data.lstrip(b'\xef\xbb\xbf\x00\x09\x0a\x0d\x20')[:4096].lower()
+    if b'<svg' in prefix and b'<!doctype' not in prefix and b'<!entity' not in prefix:
+        return '.svg'
     raise GitHubFSError(
         'GITHUB_ASSET_INVALID',
         'GitHub Writer assets must be supported image files.',
@@ -196,6 +199,7 @@ class GitHubWriterProvider(WriterProviderBase):
                     'provider': self.provider,
                     'role': 'background',
                     'referenced_from': target.uri,
+                    'source_reference': raw_url,
                     'size': len(payload),
                 },
             ))
@@ -368,7 +372,7 @@ class GitHubWriterProvider(WriterProviderBase):
         target_type = self._target_type(target)
         asset_dir = '_assets' if target_type == 'wiki' else 'assets'
         files: dict[str, bytes] = {}
-        rewritten = markdown
+        rewritten = self._restore_imported_media_references(markdown, media_assets)
         used_paths: set[str] = set()
         total_size = 0
         for asset_id, asset in media_assets.assets.items():
@@ -408,6 +412,52 @@ class GitHubWriterProvider(WriterProviderBase):
             link = posixpath.relpath(relative_target, document_dir or '.')
             rewritten = rewritten.replace(marker, quote(link, safe='/._-'))
         return rewritten, files
+
+    @staticmethod
+    def _restore_imported_media_references(
+        markdown: str,
+        media_assets: MediaAssetLibrary,
+    ) -> str:
+        replacements: dict[str, str] = {}
+        for asset in media_assets.assets.values():
+            source_reference = str(asset.meta.get('source_reference') or '').strip()
+            if not source_reference:
+                continue
+            for candidate in (
+                str(asset.local_path or '').strip(),
+                str(asset.meta.get('preview_reference') or '').strip(),
+            ):
+                if candidate:
+                    replacements[candidate] = source_reference
+        if not replacements:
+            return markdown
+
+        def replace_url(match: re.Match, *, image_only: bool) -> str:
+            if image_only and not match.groupdict().get('image'):
+                return match.group(0)
+            token = str(match.group('url') or '')
+            value = token.strip('<>')
+            replacement = replacements.get(value)
+            if not replacement:
+                return match.group(0)
+            if token.startswith('<') and token.endswith('>'):
+                replacement = f'<{replacement}>'
+            start, end = match.span('url')
+            offset = match.start()
+            return (
+                match.group(0)[:start - offset]
+                + replacement
+                + match.group(0)[end - offset:]
+            )
+
+        restored = _MARKDOWN_LINK_RE.sub(
+            lambda match: replace_url(match, image_only=True),
+            markdown,
+        )
+        return _HTML_MEDIA_RE.sub(
+            lambda match: replace_url(match, image_only=False),
+            restored,
+        )
 
 
 __all__ = ['GitHubWriterProvider']

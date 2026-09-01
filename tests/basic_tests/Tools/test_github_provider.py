@@ -57,6 +57,7 @@ def test_load_document_preserves_markdown_and_collects_direct_resources():
     assert loaded['input_resources'][0].uri == (
         'githubrepo:/acme/docs/assets/diagram.png?ref=main'
     )
+    assert loaded['input_resources'][0].meta['source_reference'] == 'assets/diagram.png'
 
 
 def test_load_document_keeps_pr_continuation_metadata():
@@ -174,6 +175,70 @@ def test_replace_document_materializes_only_referenced_assets(tmp_path):
     expected_path = f'assets/{digest[:2]}/{digest}.png'
     assert markdown == f'![diagram]({expected_path})'
     assert files == {expected_path: image_data}
+
+
+def test_replace_document_materializes_new_svg_as_relative_repository_asset(tmp_path):
+    image = tmp_path / 'diagram.svg'
+    image_data = b'<svg xmlns="http://www.w3.org/2000/svg"></svg>'
+    image.write_bytes(image_data)
+    library = MediaAssetLibrary(
+        library_id='library-1',
+        assets={
+            'asset-1': MediaAsset(
+                media_asset_id='asset-1',
+                asset_type='image',
+                source_type='input_resource',
+                local_path=str(image),
+            ),
+        },
+    )
+    resolved = _resolved_target()
+    resolved['path'] = 'docs/guide.md'
+    target = GitHubWriterProvider._target_from_resolved(resolved)
+
+    markdown, files = GitHubWriterProvider()._materialize_media(
+        '![diagram](asset://asset-1)', target, library,
+    )
+
+    digest = hashlib.sha256(image_data).hexdigest()
+    repository_path = f'docs/assets/{digest[:2]}/{digest}.svg'
+    assert markdown == f'![diagram](assets/{digest[:2]}/{digest}.svg)'
+    assert files == {repository_path: image_data}
+
+
+def test_replace_document_restores_imported_image_reference(tmp_path):
+    image = tmp_path / 'diagram.png'
+    image.write_bytes(b'preview-only')
+    library = MediaAssetLibrary(
+        library_id='library-1',
+        assets={
+            'asset-1': MediaAsset(
+                media_asset_id='asset-1',
+                asset_type='image',
+                source_type='input_resource',
+                local_path=str(image),
+                meta={
+                    'source_reference': './diagram.png',
+                    'preview_reference': (
+                        '/static-files/writer-preview-assets/aa/diagram.png'
+                        '?expires=123&sig=abc'
+                    ),
+                },
+            ),
+        },
+    )
+    target = GitHubWriterProvider._target_from_resolved(_resolved_target())
+
+    markdown, files = GitHubWriterProvider()._materialize_media(
+        f'![diagram]({image})\n\n'
+        '<img src="/static-files/writer-preview-assets/aa/diagram.png'
+        '?expires=123&sig=abc">\n',
+        target,
+        library,
+    )
+
+    assert markdown == '![diagram](./diagram.png)\n\n<img src="./diagram.png">\n'
+    assert files == {}
 
 
 def test_github_provider_rejects_non_markdown_repo_urls():

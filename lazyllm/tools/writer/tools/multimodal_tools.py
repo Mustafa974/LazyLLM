@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import re
 import socket
 from io import BytesIO
 from pathlib import Path
@@ -30,7 +31,9 @@ from ..prompts import RESOLVE_VISUAL_NEEDS_PROMPT, VISION_SUMMARY_PROMPT
 
 
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
-_IMAGE_SUFFIXES = {'.bmp', '.gif', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp'}
+_IMAGE_SUFFIXES = {
+    '.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.tif', '.tiff', '.webp',
+}
 _MAX_REDIRECTS = 5
 
 
@@ -288,7 +291,14 @@ class WriterMultimodalTools(WriterToolBase):
         size = len(data)
         if not 0 < size <= _MAX_IMAGE_BYTES:
             raise ValueError('image file must be between 1 byte and 20 MB.')
-        image_format, width, height = self._inspect_image_bytes(data)
+        is_svg = (
+            str(resource.mime_type or '').lower() == 'image/svg+xml'
+            or str(suffix_hint or '').lower() == '.svg'
+        )
+        if is_svg:
+            image_format, width, height = self._inspect_svg_bytes(data)
+        else:
+            image_format, width, height = self._inspect_image_bytes(data)
         digest = hashlib.sha256(data).hexdigest()
         suffix = self._image_suffix(suffix_hint, image_format)
         destination = self._assets_dir() / f'{digest}{suffix}'
@@ -306,7 +316,10 @@ class WriterMultimodalTools(WriterToolBase):
         source_type = str(resource.meta.get('source_type') or 'input_resource')
         source_meta = {
             key: resource.meta[key]
-            for key in ('origin', 'provider', 'provider_block_id')
+            for key in (
+                'origin', 'provider', 'provider_block_id', 'referenced_from',
+                'source_reference',
+            )
             if resource.meta.get(key) not in (None, '')
         }
         return MediaAsset(
@@ -320,7 +333,10 @@ class WriterMultimodalTools(WriterToolBase):
             meta={
                 **source_meta,
                 'sha256': digest,
-                'mime_type': PIL.Image.MIME.get(image_format),
+                'mime_type': (
+                    'image/svg+xml' if image_format == 'SVG'
+                    else PIL.Image.MIME.get(image_format)
+                ),
                 'byte_size': size,
                 'width': width,
                 'height': height,
@@ -589,6 +605,44 @@ class WriterMultimodalTools(WriterToolBase):
         if not image_format:
             raise ValueError('image format cannot be detected.')
         return image_format, width, height
+
+    @staticmethod
+    def _inspect_svg_bytes(data: bytes) -> tuple[str, int, int]:
+        try:
+            text = data.decode('utf-8-sig').lstrip()
+        except UnicodeDecodeError as exc:
+            raise ValueError('SVG data must be UTF-8 text.') from exc
+        lowered = text[:4096].lower()
+        if '<!doctype' in lowered or '<!entity' in lowered:
+            raise ValueError('SVG data must not contain DTD or entity declarations.')
+        svg_match = re.search(r'<svg\b(?P<attrs>[^>]*)>', text, re.IGNORECASE)
+        if not svg_match:
+            raise ValueError('image data is not a valid SVG image.')
+        attrs = svg_match.group('attrs')
+
+        def dimension(name: str) -> int:
+            match = re.search(
+                rf'\b{name}\s*=\s*["\']\s*([0-9]+(?:\.[0-9]+)?)',
+                attrs,
+                re.IGNORECASE,
+            )
+            return int(float(match.group(1))) if match else 0
+
+        width, height = dimension('width'), dimension('height')
+        if not width or not height:
+            view_box = re.search(
+                r'\bviewBox\s*=\s*["\']\s*[-+0-9.eE]+\s+[-+0-9.eE]+\s+'
+                r'([-+0-9.eE]+)\s+([-+0-9.eE]+)',
+                attrs,
+                re.IGNORECASE,
+            )
+            if view_box:
+                try:
+                    width = width or max(0, int(float(view_box.group(1))))
+                    height = height or max(0, int(float(view_box.group(2))))
+                except ValueError:
+                    pass
+        return 'SVG', width, height
 
     @staticmethod
     def _image_suffix(suffix_hint: str, image_format: str) -> str:
