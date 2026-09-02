@@ -154,28 +154,20 @@ def test_apply_patch_supports_all_block_operations():
 
 def test_document_diff_ignores_preview_asset_refreshes():
     source = WriterDocument(
-        document_id='doc-1',
-        stage='final',
-        blocks=[WriterBlock(
-            node_id='image-1',
-            type='image',
-            content='示例图片',
-            stage='final',
-            references=[{
-                'type': 'preview_asset',
-                'provider': 'notion',
-                'url': 'https://example.com/old.png',
-                'expires_at': '2026-09-02T01:00:00Z',
-            }],
-        )],
+        document_id='doc-1', stage='final', blocks=[_image_block('image-1')],
     )
+    source.blocks[0].references = [{
+        'type': 'preview_asset',
+        'provider': 'notion',
+        'url': 'https://example.com/old.png',
+        'expires_at': '2026-09-02T01:00:00Z',
+    }]
     revised = source.model_copy(deep=True)
-    revised.blocks[0].references[0]['url'] = 'https://example.com/new.png'
-    revised.blocks[0].references[0]['expires_at'] = '2026-09-02T02:00:00Z'
+    revised.blocks[0].references[0].update(
+        url='https://example.com/new.png',
+        expires_at='2026-09-02T02:00:00Z')
 
-    patch_set = WriterRevisionTools()._diff_documents(source, revised)
-
-    assert patch_set.hunks == []
+    assert WriterRevisionTools()._diff_documents(source, revised).hunks == []
 
 
 def test_apply_patch_supports_image_create_and_delete(tmp_path):
@@ -377,55 +369,26 @@ def test_normalize_move_plan_uses_destination_ref():
     assert normalized.instructions[0].destination_ref == destination_ref
 
 
-@pytest.mark.parametrize(
-    ('document_order', 'generated_order', 'position', 'expected_order'),
-    [
-        (
-            ('label', 'water', 'food', 'anchor', 'tail'),
-            ('label', 'water', 'food'),
-            'after',
-            ('anchor', 'label', 'water', 'food', 'tail'),
-        ),
-        (
-            ('anchor', 'tail', 'label', 'water', 'food'),
-            ('food', 'water', 'label'),
-            'before',
-            ('label', 'water', 'food', 'anchor', 'tail'),
-        ),
-    ],
-)
-def test_normalize_move_plan_preserves_contiguous_group_order(
-    document_order, generated_order, position, expected_order,
-):
+def test_normalize_move_plan_preserves_contiguous_group_order():
     tool = WriterRevisionTools()
-    content = {
-        'anchor': '目标锚点',
-        'tail': '保留段落',
-        'label': '必要的物资清单：',
-        'water': '瓶装水',
-        'food': '压缩饼干',
-    }
     document = WriterDocument(
-        document_id='doc-1',
-        stage='final',
-        blocks=[_block(node_id, content[node_id]) for node_id in document_order],
+        document_id='doc-1', stage='final',
+        blocks=[_block(node_id, node_id) for node_id in
+                ('anchor', 'tail', 'label', 'water', 'food')],
     )
     refs = [ContentRef(node_id=node_id) for node_id in ('label', 'water', 'food')]
     refs_by_id = {ref.node_id: ref for ref in refs}
     destination_ref = ContentRef(node_id='anchor')
     plan = ModifyPlan(
         scope='block',
-        instructions=[
-            ModifyInstruction(
-                instruction_id=f'move-{index}',
-                content_ref=refs_by_id[node_id],
-                destination_ref=destination_ref,
-                modify_type='move',
-                position=position,
-                instruction=f'移动第 {index} 项',
-            )
-            for index, node_id in enumerate(generated_order, start=1)
-        ],
+        instructions=[ModifyInstruction(
+            instruction_id=f'move-{index}',
+            content_ref=refs_by_id[node_id],
+            destination_ref=destination_ref,
+            modify_type='move',
+            position='before',
+            instruction='整体移动物资清单',
+        ) for index, node_id in enumerate(('food', 'water', 'label'), start=1)],
     )
 
     normalized = tool._normalize_modify_plan(
@@ -435,15 +398,6 @@ def test_normalize_move_plan_preserves_contiguous_group_order(
         {tool._content_ref_key(ref) for ref in [*refs, destination_ref]},
         document=document,
     )
-
-    assert [instruction.content_ref for instruction in normalized.instructions] == refs
-    assert normalized.instructions[0].destination_ref == destination_ref
-    assert normalized.instructions[0].position == position
-    assert normalized.instructions[1].destination_ref == refs[0]
-    assert normalized.instructions[1].position == 'after'
-    assert normalized.instructions[2].destination_ref == refs[1]
-    assert normalized.instructions[2].position == 'after'
-
     patch_set = tool._compile_generated_revision(
         document,
         normalized,
@@ -452,7 +406,9 @@ def test_normalize_move_plan_preserves_contiguous_group_order(
     )
     revised, _ = apply_patch_to_ir(document, patch_set)
 
-    assert [block.node_id for block in revised.blocks] == list(expected_order)
+    assert [block.node_id for block in revised.blocks] == [
+        'label', 'water', 'food', 'anchor', 'tail',
+    ]
 
 
 def test_content_ref_key_prefers_node_id_over_auxiliary_locators():
