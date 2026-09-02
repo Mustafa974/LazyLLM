@@ -84,6 +84,80 @@ def test_repo_resolve_target_keeps_revision_and_blob_sha():
     assert target['target_type'] == 'repository'
 
 
+def test_repo_create_parent_uses_default_branch_without_creating_a_file():
+    fs = GitHubRepoFS(token='create-parent-test-token', skip_instance_cache=True)
+    fs._repository = MagicMock(return_value={
+        'default_branch': 'main',
+        'permissions': {'push': True},
+    })
+    fs._branch_head = MagicMock(return_value='commit-1')
+    fs._content = MagicMock()
+
+    target = fs.resolve_create_parent('https://github.com/acme/docs')
+
+    assert target['base_ref'] == 'main'
+    assert target['revision'] == 'commit-1'
+    assert target['create_pending'] is True
+    fs._content.assert_not_called()
+
+
+def test_repo_create_parent_resolves_branch_with_slashes_and_directory():
+    fs = GitHubRepoFS(token='create-tree-test-token', skip_instance_cache=True)
+    fs._repository = MagicMock(return_value={
+        'default_branch': 'main',
+        'permissions': {'push': True},
+    })
+    fs._branch_head = MagicMock(side_effect=lambda _owner, _repo, ref, missing_ok=False: {
+        'release/v1': 'commit-release',
+    }.get(ref))
+    fs._content = MagicMock(return_value=[])
+
+    target = fs.resolve_create_parent(
+        'https://github.com/acme/docs/tree/release/v1/guides',
+    )
+
+    assert target['base_ref'] == 'release/v1'
+    assert target['directory'] == 'guides'
+    fs._content.assert_called_once_with('acme', 'docs', 'guides', 'release/v1')
+
+
+def test_repo_create_parent_rejects_missing_push_permission():
+    fs = GitHubRepoFS(token='create-permission-test-token', skip_instance_cache=True)
+    fs._repository = MagicMock(return_value={
+        'default_branch': 'main',
+        'permissions': {'push': False},
+    })
+
+    with pytest.raises(GitHubFSError) as captured:
+        fs.resolve_create_parent('https://github.com/acme/docs')
+
+    assert captured.value.code == 'GITHUB_PERMISSION_DENIED'
+
+
+def test_repo_create_target_keeps_unicode_title_and_rejects_existing_file():
+    fs = GitHubRepoFS(token='create-target-test-token', skip_instance_cache=True)
+    parent = {
+        'owner': 'acme',
+        'repo': 'docs',
+        'base_ref': 'main',
+        'revision': 'commit-1',
+        'directory': 'articles',
+    }
+    fs._content = MagicMock(side_effect=GitHubFSError(
+        'GITHUB_TARGET_NOT_FOUND', 'Not Found', status_code=404,
+    ))
+
+    target = fs.resolve_create_target(parent, '从零开始写文章')
+
+    assert target['path'] == 'articles/从零开始写文章.md'
+    assert target['uri'].startswith('githubrepo:/acme/docs/articles/')
+
+    fs._content = MagicMock(return_value={'type': 'file'})
+    with pytest.raises(GitHubFSError) as captured:
+        fs.resolve_create_target(parent, '从零开始写文章')
+    assert captured.value.code == 'GITHUB_TARGET_EXISTS'
+
+
 def test_repo_document_patch_rejects_stale_revision():
     fs = GitHubRepoFS(token='stale-direct-test-token', skip_instance_cache=True)
     fs._branch_head = MagicMock(return_value='new-head')

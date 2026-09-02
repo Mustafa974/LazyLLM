@@ -42,6 +42,11 @@ class WriterProviderBase(ABC):
         raise NotImplementedError(
             f'{self.provider or type(self).__name__} does not support create_document().')
 
+    def plan_document(self, parent_uri: str) -> TargetDocument:
+        '''Validate a future document target without creating remote content.'''
+        raise NotImplementedError(
+            f'{self.provider or type(self).__name__} does not support plan_document().')
+
     @abstractmethod
     def replace_document(
         self,

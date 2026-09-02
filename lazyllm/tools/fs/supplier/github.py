@@ -86,6 +86,26 @@ def _repo_browser_url(owner: str, repo: str, ref: str, path: str) -> str:
     )
 
 
+def _repo_parent_browser_url(owner: str, repo: str, ref: str = '', directory: str = '') -> str:
+    base = f'https://github.com/{quote(owner, safe="")}/{quote(repo, safe="")}'
+    if not ref:
+        return base
+    suffix = f'/{quote(directory, safe="/")}' if directory else ''
+    return f'{base}/tree/{quote(ref, safe="/")}{suffix}'
+
+
+def _markdown_filename(title: str) -> str:
+    name = re.sub(r'[\x00-\x1f\x7f/\\:*?"<>|]+', '-', str(title or '').strip())
+    name = re.sub(r'\s+', '-', name)
+    name = re.sub(r'-{2,}', '-', name).strip(' .-_')
+    if not name:
+        name = 'untitled'
+    suffix = PurePosixPath(name).suffix.lower()
+    if suffix not in _MARKDOWN_SUFFIXES:
+        name = f'{name[:120].rstrip(" .-_")}.md'
+    return _validate_repo_path(name, markdown_only=True)
+
+
 def _wiki_browser_url(owner: str, repo: str, path: str) -> str:
     page = path.rsplit('.', 1)[0]
     return (
@@ -298,7 +318,8 @@ class GitHubRepoFS(_GitHubFSBase):
     """Read and atomically publish files in GitHub repositories."""
 
     __public_apis__ = LazyLLMFSBase.__public_apis__ + [
-        'resolve_target', 'apply_document_patch', 'create_document',
+        'resolve_target', 'resolve_create_parent', 'resolve_create_target',
+        'apply_document_patch', 'create_document',
     ]
 
     @staticmethod
@@ -360,6 +381,134 @@ class GitHubRepoFS(_GitHubFSBase):
             'The GitHub URL does not identify an existing Markdown file and branch.',
             status_code=400,
         )
+
+    @classmethod
+    def matches_create_parent(cls, value: str) -> bool:
+        parsed = urlparse(clean_document_ref(str(value or '').strip()))
+        if parsed.scheme not in {'http', 'https'} or (parsed.hostname or '').lower() not in _GITHUB_HOSTS:
+            return False
+        parts = [part for part in parsed.path.split('/') if part]
+        return len(parts) == 2 or (
+            len(parts) >= 4 and parts[2].lower() == 'tree'
+        )
+
+    def _parse_create_parent(self, value: str) -> tuple[str, str, str, str, dict[str, Any]]:
+        parsed = urlparse(clean_document_ref(str(value or '').strip()))
+        if parsed.scheme not in {'http', 'https'} or (parsed.hostname or '').lower() not in _GITHUB_HOSTS:
+            raise ValueError('GitHub create parent must be a github.com repository or tree URL.')
+        parts = [unquote(part) for part in parsed.path.split('/') if part]
+        if len(parts) < 2:
+            raise ValueError('GitHub create parent must include owner and repository.')
+        owner = _validate_repo_part(parts[0], 'owner')
+        repo_value = parts[1][:-4] if parts[1].lower().endswith('.git') else parts[1]
+        repo = _validate_repo_part(repo_value, 'repository')
+        repository = self._repository(owner, repo)
+        if len(parts) == 2:
+            ref = str(repository.get('default_branch') or '').strip()
+            if not ref:
+                raise GitHubFSError(
+                    'GITHUB_BRANCH_NOT_FOUND', 'GitHub repository has no default branch.',
+                )
+            return owner, repo, ref, '', repository
+        if len(parts) < 4 or parts[2].lower() != 'tree':
+            raise ValueError('GitHub create parent must be a repository root or /tree/{ref}/{directory} URL.')
+        tail = parts[3:]
+        for split_at in range(len(tail), 0, -1):
+            ref = '/'.join(tail[:split_at])
+            directory = '/'.join(tail[split_at:])
+            if self._branch_head(owner, repo, ref, missing_ok=True):
+                if directory:
+                    directory = _validate_repo_path(directory)
+                return owner, repo, ref, directory, repository
+        raise GitHubFSError(
+            'GITHUB_BRANCH_NOT_FOUND',
+            'The GitHub tree URL does not identify an existing branch.',
+            status_code=404,
+        )
+
+    def resolve_create_parent(self, parent: str) -> dict[str, Any]:
+        owner, repo, ref, directory, repository = self._parse_create_parent(parent)
+        permissions = repository.get('permissions')
+        if isinstance(permissions, Mapping) and permissions.get('push') is False:
+            raise GitHubFSError(
+                'GITHUB_PERMISSION_DENIED',
+                'The current GitHub account cannot create files in this repository.',
+                status_code=403,
+            )
+        revision = self._branch_head(owner, repo, ref)
+        if directory:
+            content = self._content(owner, repo, directory, ref)
+            if not isinstance(content, list) and content.get('type') != 'dir':
+                raise GitHubFSError(
+                    'GITHUB_TARGET_INVALID',
+                    'The GitHub tree URL does not identify a repository directory.',
+                    status_code=400,
+                )
+        return {
+            'uri': _repo_parent_browser_url(owner, repo, ref, directory),
+            'browser_url': _repo_parent_browser_url(owner, repo, ref, directory),
+            'owner': owner,
+            'repo': repo,
+            'ref': ref,
+            'base_ref': ref,
+            'directory': directory,
+            'revision': revision,
+            'target_type': 'repository',
+            'fs_scheme': 'githubrepo',
+            'publish_mode': 'pull_request',
+            'create_pending': True,
+            'parent_uri': str(parent or '').strip(),
+        }
+
+    def resolve_create_target(
+        self,
+        parent: Mapping[str, Any],
+        title: str,
+    ) -> dict[str, Any]:
+        owner = _validate_repo_part(str(parent.get('owner') or ''), 'owner')
+        repo = _validate_repo_part(str(parent.get('repo') or ''), 'repository')
+        ref = str(parent.get('base_ref') or parent.get('ref') or '').strip()
+        revision = str(parent.get('revision') or '').strip()
+        if not ref or not revision:
+            raise GitHubFSError(
+                'GITHUB_TARGET_INVALID',
+                'Pending GitHub target is missing its base branch or revision.',
+                status_code=400,
+            )
+        directory = str(parent.get('directory') or '').strip('/')
+        if directory:
+            directory = _validate_repo_path(directory)
+        filename = _markdown_filename(title)
+        repo_path = f'{directory}/{filename}' if directory else filename
+        try:
+            self._content(owner, repo, repo_path, ref)
+        except GitHubFSError as exc:
+            if exc.code != 'GITHUB_TARGET_NOT_FOUND':
+                raise
+        else:
+            raise GitHubFSError(
+                'GITHUB_TARGET_EXISTS',
+                f'GitHub target file already exists: {repo_path}.',
+                status_code=409,
+            )
+        return {
+            'doc_id': f'{owner}/{repo}:{ref}:{repo_path}',
+            'uri': _repo_uri(owner, repo, repo_path, ref),
+            'browser_url': _repo_browser_url(owner, repo, ref, repo_path),
+            'title': PurePosixPath(repo_path).stem,
+            'owner': owner,
+            'repo': repo,
+            'ref': ref,
+            'base_ref': ref,
+            'path': repo_path,
+            'directory': directory,
+            'revision': revision,
+            'target_type': 'repository',
+            'fs_scheme': 'githubrepo',
+            'publish_mode': str(parent.get('publish_mode') or 'pull_request'),
+            'create_pending': False,
+            'parent_uri': str(parent.get('parent_uri') or parent.get('uri') or ''),
+        }
 
     def _parse_target(
         self,

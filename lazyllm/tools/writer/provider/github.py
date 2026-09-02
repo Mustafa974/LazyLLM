@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import mimetypes
 import os
 import posixpath
@@ -23,14 +24,56 @@ _GITHUB_WIKI_URL_RE = re.compile(
     r'^https?://(?:www\.)?github\.com/[^/]+/[^/]+/wiki/[^?#]+',
     re.IGNORECASE,
 )
+_MARKDOWN_H1_RE = re.compile(r'^#\s+(.+?)\s*$', re.MULTILINE)
 _MARKDOWN_LINK_RE = re.compile(
     r'(?P<image>!)?\[[^\]]*\]\(\s*(?P<url><[^>]+>|[^\s)]+)(?:\s+["\'][^)]*["\'])?\s*\)',
 )
-_HTML_MEDIA_RE = re.compile(
-    r'<(?:img|source|video|audio)\b[^>]*?\bsrc=["\'](?P<url>[^"\']+)["\']',
+_MARKDOWN_LINKED_IMAGE_RE = re.compile(
+    r'\[(?P<image>!\[[^\]]*\]\(\s*(?:<[^>]+>|[^\s)]+)'
+    r'(?:\s+["\'][^)]*["\'])?\s*\))\]'
+    r'\(\s*(?:<[^>]+>|[^\s)]+)(?:\s+["\'][^)]*["\'])?\s*\)',
+)
+_HTML_IMAGE_RE = re.compile(
+    r'<img\b[^>]*?\bsrc=["\'](?P<url>[^"\']+)["\']',
     re.IGNORECASE,
 )
-_MARKDOWN_SUFFIXES = {'.md', '.markdown'}
+_HTML_LINKED_IMAGE_RE = re.compile(
+    r'(?:<a\b(?P<link_attrs>[^>]*)>\s*)?'
+    r'<img\b(?P<image_attrs>[^>]*)/?>'
+    r'(?:\s*</a>)?',
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_ATTRIBUTE_RE = re.compile(
+    r'(?P<name>[A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*'
+    r'(?:(?P<quote>["\'])(?P<quoted>.*?)\2|(?P<unquoted>[^\s>]+))',
+    re.DOTALL,
+)
+_HTML_SUB_RE = re.compile(r'<sub\b[^>]*>(?P<body>.*?)</sub>', re.IGNORECASE | re.DOTALL)
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
+_HTML_IMAGE_LAYOUT_PATTERNS = (
+    re.compile(r'<table\b[^>]*>.*?</table>', re.IGNORECASE | re.DOTALL),
+    re.compile(r'<div\b[^>]*>.*?<img\b.*?</div>', re.IGNORECASE | re.DOTALL),
+    re.compile(r'<p\b[^>]*>.*?<img\b.*?</p>', re.IGNORECASE | re.DOTALL),
+)
+_GITHUB_IMAGE_LAYOUT_META_KEY = 'github_writer_image_layouts'
+_GITHUB_CODE_FENCE_META_KEY = 'github_writer_code_fences'
+_WRITER_MARKDOWN_CODE_LANGUAGES = frozenset({
+    'bash',
+    'css',
+    'html',
+    'javascript',
+    'json',
+    'markdown',
+    'python',
+    'sql',
+    'text',
+    'typescript',
+    'yaml',
+})
+_CODE_FENCE_OPEN_RE = re.compile(
+    r'^(?P<indent>[ \t]{0,3})(?P<fence>`{3,}|~{3,})'
+    r'(?P<info>[^\r\n]*)(?P<newline>\r?\n|$)',
+)
 _MAX_ASSET_BYTES = 20 * 1024 * 1024
 _MAX_WRITE_ASSET_BYTES = 50 * 1024 * 1024
 
@@ -64,6 +107,193 @@ def _image_suffix(data: bytes) -> str:
         'GITHUB_ASSET_INVALID',
         'GitHub Writer assets must be supported image files.',
     )
+
+
+def _html_attributes(value: str) -> dict[str, str]:
+    attributes: dict[str, str] = {}
+    for match in _HTML_ATTRIBUTE_RE.finditer(value):
+        attributes[match.group('name').lower()] = html.unescape(
+            match.group('quoted') if match.group('quote') else match.group('unquoted'),
+        )
+    return attributes
+
+
+def _markdown_image_alt(value: str) -> str:
+    return str(value or '').replace('\\', '\\\\').replace('[', '\\[').replace(']', '\\]')
+
+
+def _html_image_layout_body(source: str) -> str:
+    images: list[str] = []
+    for match in _HTML_LINKED_IMAGE_RE.finditer(source):
+        image_attributes = _html_attributes(match.group('image_attrs') or '')
+        source_reference = str(image_attributes.get('src') or '').strip()
+        if not source_reference:
+            continue
+        alt = str(image_attributes.get('alt') or '').strip()
+        if not alt:
+            alt = PurePosixPath(unquote(urlparse(source_reference).path)).stem or 'image'
+        images.append(f'![{_markdown_image_alt(alt)}]({source_reference})')
+    if not images:
+        return ''
+    captions = [
+        html.unescape(_HTML_TAG_RE.sub(' ', match.group('body'))).strip()
+        for match in _HTML_SUB_RE.finditer(source)
+    ]
+    captions = [' '.join(caption.split()) for caption in captions if caption]
+    blocks: list[str] = []
+    for index, image in enumerate(images):
+        blocks.append(image)
+        if index < len(captions):
+            blocks.append(f'_{captions[index]}_')
+    return '\n\n'.join(blocks)
+
+
+def _normalize_html_image_layouts(markdown: str) -> tuple[str, list[dict[str, str]]]:
+    normalized = markdown
+    layouts: list[dict[str, str]] = []
+    for pattern in _HTML_IMAGE_LAYOUT_PATTERNS:
+        def replace(match: re.Match) -> str:
+            source = match.group(0)
+            body = _html_image_layout_body(source)
+            if not body:
+                return source
+            layout_id = hashlib.sha256(
+                f'{len(layouts)}:{source}'.encode(),
+            ).hexdigest()[:16]
+            layouts.append({
+                'id': layout_id,
+                'source': source,
+                'display': body,
+                'body': body,
+            })
+            return body
+
+        normalized = pattern.sub(replace, normalized)
+
+    def replace_linked_image(match: re.Match) -> str:
+        source = match.group(0)
+        body = match.group('image')
+        layout_id = hashlib.sha256(
+            f'{len(layouts)}:{source}'.encode(),
+        ).hexdigest()[:16]
+        layouts.append({
+            'id': layout_id,
+            'source': source,
+            'display': body,
+            'body': body,
+        })
+        return body
+
+    normalized = _MARKDOWN_LINKED_IMAGE_RE.sub(replace_linked_image, normalized)
+    return normalized, layouts
+
+
+def _normalize_code_fences(markdown: str) -> tuple[str, list[dict[str, str]]]:
+    lines = markdown.splitlines(keepends=True)
+    normalized: list[str] = []
+    layouts: list[dict[str, str]] = []
+    index = 0
+    while index < len(lines):
+        opening = _CODE_FENCE_OPEN_RE.match(lines[index])
+        if opening is None:
+            normalized.append(lines[index])
+            index += 1
+            continue
+
+        fence = opening.group('fence')
+        closing_re = re.compile(
+            rf'^[ \t]{{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*(?:\r?\n|$)',
+        )
+        end = index + 1
+        while end < len(lines) and closing_re.match(lines[end]) is None:
+            end += 1
+        if end < len(lines):
+            end += 1
+
+        info = opening.group('info')
+        info_match = re.match(
+            r'(?P<leading>[ \t]*)(?P<language>\S+)(?P<rest>.*)', info,
+        )
+        if info_match is None or info_match.group('language') in _WRITER_MARKDOWN_CODE_LANGUAGES:
+            normalized.extend(lines[index:end])
+            index = end
+            continue
+
+        display_info = (
+            f"{info_match.group('leading')}text{info_match.group('rest')}"
+        )
+        display_opening = (
+            f"{opening.group('indent')}{fence}{display_info}{opening.group('newline')}"
+        )
+        source = ''.join(lines[index:end])
+        display = display_opening + ''.join(lines[index + 1:end])
+        layout_id = hashlib.sha256(
+            f'{len(layouts)}:{source}'.encode(),
+        ).hexdigest()[:16]
+        layouts.append({
+            'id': layout_id,
+            'language': info_match.group('language'),
+            'source': source,
+            'display': display,
+        })
+        normalized.append(display)
+        index = end
+    return ''.join(normalized), layouts
+
+
+def _image_references(markdown: str) -> set[str]:
+    references = {
+        str(match.group('url') or '').strip('<>')
+        for match in _MARKDOWN_LINK_RE.finditer(markdown)
+        if match.group('image')
+    }
+    references.update(
+        str(match.group('url') or '').strip('<>')
+        for match in _HTML_IMAGE_RE.finditer(markdown)
+    )
+    return {reference for reference in references if reference}
+
+
+def _rewrite_image_references(
+    markdown: str,
+    replacements: Mapping[str, str],
+) -> str:
+    if not replacements:
+        return markdown
+
+    def replace_url(match: re.Match, *, image_only: bool) -> str:
+        if image_only and not match.groupdict().get('image'):
+            return match.group(0)
+        token = str(match.group('url') or '')
+        value = token.strip('<>')
+        replacement = str(replacements.get(value) or '')
+        if not replacement:
+            return match.group(0)
+        if token.startswith('<') and token.endswith('>'):
+            replacement = f'<{replacement}>'
+        start, end = match.span('url')
+        offset = match.start()
+        return (
+            match.group(0)[:start - offset]
+            + replacement
+            + match.group(0)[end - offset:]
+        )
+
+    rewritten = _MARKDOWN_LINK_RE.sub(
+        lambda match: replace_url(match, image_only=True),
+        markdown,
+    )
+    return _HTML_IMAGE_RE.sub(
+        lambda match: replace_url(match, image_only=False),
+        rewritten,
+    )
+
+
+def _matches_writer_preview(reference: str, digest: str) -> bool:
+    if not digest or not re.fullmatch(r'[0-9a-f]{64}', digest):
+        return False
+    path = unquote(urlparse(reference).path).lower()
+    return '/writer-preview-assets/' in path and digest in path
 
 
 class GitHubWriterProvider(WriterProviderBase):
@@ -144,9 +374,17 @@ class GitHubWriterProvider(WriterProviderBase):
         resources, warnings = self._collect_referenced_resources(
             markdown, resolved_target, fs,
         )
+        writer_markdown, image_layouts = _normalize_html_image_layouts(markdown)
+        if image_layouts:
+            resolved_target.meta[_GITHUB_IMAGE_LAYOUT_META_KEY] = image_layouts
+        else:
+            resolved_target.meta.pop(_GITHUB_IMAGE_LAYOUT_META_KEY, None)
+        writer_markdown = self.normalize_code_fences_for_writer(
+            writer_markdown, resolved_target, replace_existing=True,
+        )
         return {
             'representation': 'markdown',
-            'source_document': markdown,
+            'source_document': writer_markdown,
             'target_document': resolved_target,
             'provider': self.provider,
             'block_count': 1,
@@ -154,34 +392,57 @@ class GitHubWriterProvider(WriterProviderBase):
             'resource_warnings': warnings,
         }
 
+    @staticmethod
+    def normalize_code_fences_for_writer(
+        markdown: str,
+        target: TargetDocument,
+        *,
+        replace_existing: bool = False,
+    ) -> str:
+        normalized, layouts = _normalize_code_fences(markdown)
+        existing = [] if replace_existing else target.meta.get(_GITHUB_CODE_FENCE_META_KEY)
+        merged = [item for item in existing or [] if isinstance(item, Mapping)]
+        existing_counts: dict[tuple[str, str], int] = {}
+        for item in merged:
+            identity = (str(item.get('source') or ''), str(item.get('display') or ''))
+            existing_counts[identity] = existing_counts.get(identity, 0) + 1
+        incoming_counts: dict[tuple[str, str], int] = {}
+        for layout in layouts:
+            identity = (layout['source'], layout['display'])
+            incoming_counts[identity] = incoming_counts.get(identity, 0) + 1
+            if incoming_counts[identity] > existing_counts.get(identity, 0):
+                merged.append(layout)
+        if merged:
+            target.meta[_GITHUB_CODE_FENCE_META_KEY] = merged
+        elif replace_existing:
+            target.meta.pop(_GITHUB_CODE_FENCE_META_KEY, None)
+        return normalized
+
     def _collect_referenced_resources(
         self,
         markdown: str,
         target: TargetDocument,
         fs: GitHubRepoFS | GitHubWikiFS,
     ) -> tuple[list[InputResource], list[str]]:
-        candidates: list[tuple[str, bool]] = []
+        candidates: list[str] = []
         candidates.extend(
-            (match.group('url').strip('<>'), bool(match.group('image')))
+            match.group('url').strip('<>')
             for match in _MARKDOWN_LINK_RE.finditer(markdown)
+            if match.group('image')
         )
         candidates.extend(
-            (match.group('url').strip(), True)
-            for match in _HTML_MEDIA_RE.finditer(markdown)
+            match.group('url').strip()
+            for match in _HTML_IMAGE_RE.finditer(markdown)
         )
         resources: list[InputResource] = []
         warnings: list[str] = []
         seen: set[str] = set()
-        for raw_url, image_hint in candidates:
+        for raw_url in candidates:
             uri = self._referenced_uri(raw_url, target)
             if not uri or uri in seen:
                 continue
             seen.add(uri)
-            suffix = PurePosixPath(urlparse(uri).path).suffix.lower()
-            if suffix in _MARKDOWN_SUFFIXES:
-                continue
             mime_type = mimetypes.guess_type(unquote(urlparse(uri).path))[0]
-            resource_type = 'image' if image_hint or str(mime_type or '').startswith('image/') else 'file'
             try:
                 payload = fs.read_bytes(uri)
             except Exception as exc:  # noqa: BLE001 - one resource failure becomes a warning.
@@ -190,7 +451,7 @@ class GitHubWriterProvider(WriterProviderBase):
                 continue
             resources.append(InputResource(
                 resource_id=f'github-resource-{len(resources)}',
-                resource_type=resource_type,
+                resource_type='image',
                 uri=uri,
                 mime_type=mime_type,
                 title=PurePosixPath(unquote(urlparse(uri).path)).name or None,
@@ -217,21 +478,28 @@ class GitHubWriterProvider(WriterProviderBase):
             return ''
         parsed = urlparse(value)
         if parsed.scheme in ('http', 'https'):
-            if (parsed.hostname or '').lower() not in {'github.com', 'www.github.com'}:
-                return ''
             if target_type != 'repository':
                 return ''
-            parts = [part for part in parsed.path.split('/') if part]
-            if len(parts) < 5 or parts[0] != owner or parts[1] != repo or parts[2] != 'blob':
+            hostname = (parsed.hostname or '').lower()
+            parts = [unquote(part) for part in parsed.path.split('/') if part]
+            if hostname in {'github.com', 'www.github.com'}:
+                if len(parts) < 5 or parts[0] != owner or parts[1] != repo or parts[2] != 'blob':
+                    return ''
+                # Referenced browser URLs are normally generated with the same ref
+                # as the source document, so remove that exact prefix without
+                # guessing another branch boundary.
+                ref = str(target.meta.get('ref') or '')
+                tail = '/'.join(parts[3:])
+                if not ref or not tail.startswith(ref + '/'):
+                    return ''
+                resource_path = tail[len(ref) + 1:]
+            elif hostname == 'raw.githubusercontent.com':
+                if len(parts) < 4:
+                    return ''
+                owner, repo, ref = parts[:3]
+                resource_path = '/'.join(parts[3:])
+            else:
                 return ''
-            # Referenced browser URLs are normally generated with the same ref
-            # as the source document, so remove that exact prefix without
-            # guessing another branch boundary.
-            ref = str(target.meta.get('ref') or '')
-            tail = unquote('/'.join(parts[3:]))
-            if not ref or not tail.startswith(ref + '/'):
-                return ''
-            resource_path = tail[len(ref) + 1:]
         else:
             relative_path = unquote(parsed.path)
             if relative_path.startswith('/'):
@@ -267,6 +535,15 @@ class GitHubWriterProvider(WriterProviderBase):
         )
         return self._target_from_resolved(created)
 
+    def plan_document(self, parent_uri: str) -> TargetDocument:
+        parent_uri = str(parent_uri or '').strip()
+        if not GitHubRepoFS.matches_create_parent(parent_uri):
+            raise ValueError(
+                'GitHub plan_document requires a repository root or tree directory URL.',
+            )
+        planned = GitHubRepoFS(dynamic_auth=True).resolve_create_parent(parent_uri)
+        return self._target_from_resolved(planned)
+
     def replace_document(
         self,
         content: WriterDocument | str,
@@ -280,10 +557,35 @@ class GitHubWriterProvider(WriterProviderBase):
             raise TypeError('GitHub Writer Provider content must be a Markdown string.')
         target_type = self._target_type(target)
         fs = self._fs(target_type)
+        if target.meta.get('create_pending'):
+            heading = _MARKDOWN_H1_RE.search(content)
+            title = (
+                str(target.title or '').strip()
+                or (heading.group(1).strip() if heading else '')
+                or 'untitled'
+            )
+            resolved = fs.resolve_create_target(target.meta, title)
+            planned_target = self._merge_target(target, resolved)
+            target.doc_id = planned_target.doc_id
+            target.uri = planned_target.uri
+            target.title = planned_target.title
+            target.adapter = planned_target.adapter
+            target.meta = planned_target.meta
+            target.meta.setdefault(
+                'commit_message', f'Create {target.meta.get("path")} via LazyMind',
+            )
+            target.meta.setdefault(
+                'pull_request_title', f'Create {target.meta.get("path")}',
+            )
         if not target.meta.get('revision'):
             refreshed = fs.resolve_target(self._locator(target))
             target = self._merge_target(target, refreshed)
-        markdown, files = self._materialize_media(content, target, media_assets)
+        markdown = content
+        if media_assets is not None:
+            markdown = self._restore_imported_media_references(markdown, media_assets)
+        markdown = self._restore_html_image_layouts(markdown, target)
+        markdown = self._restore_code_fences(markdown, target)
+        markdown, files = self._materialize_media(markdown, target, media_assets)
         publish_mode = str(target.meta.get('publish_mode') or target.meta.get('write_mode') or '').strip()
         if not publish_mode:
             publish_mode = 'direct' if target_type == 'wiki' else 'pull_request'
@@ -373,45 +675,119 @@ class GitHubWriterProvider(WriterProviderBase):
         asset_dir = '_assets' if target_type == 'wiki' else 'assets'
         files: dict[str, bytes] = {}
         rewritten = self._restore_imported_media_references(markdown, media_assets)
-        used_paths: set[str] = set()
         total_size = 0
         for asset_id, asset in media_assets.assets.items():
-            marker = f'asset://{asset_id}'
-            if marker not in rewritten:
-                continue
+            references = _image_references(rewritten)
             local_path = str(asset.local_path or '').strip()
+            meta = asset.meta if isinstance(asset.meta, Mapping) else {}
+            candidates = {
+                f'asset://{asset_id}',
+                local_path,
+                str(asset.uri or '').strip(),
+                str(meta.get('preview_reference') or '').strip(),
+            }
+            candidates.discard('')
+            matched = references.intersection(candidates)
+            digest = str(meta.get('sha256') or '').strip().lower()
+            data: bytes | None = None
+            if not matched and local_path and os.path.isfile(local_path):
+                data = Path(local_path).read_bytes()
+                digest = hashlib.sha256(data).hexdigest()
+            if not matched and digest:
+                matched = {
+                    reference
+                    for reference in references
+                    if _matches_writer_preview(reference, digest)
+                }
+            if not matched:
+                continue
             if not local_path or not os.path.isfile(local_path):
                 raise GitHubFSError(
                     'GITHUB_ASSET_INVALID',
                     f'Media asset {asset_id!r} has no readable local_path.',
                 )
-            data = Path(local_path).read_bytes()
+            if data is None:
+                data = Path(local_path).read_bytes()
             if not data or len(data) > _MAX_ASSET_BYTES:
                 raise GitHubFSError(
                     'GITHUB_ASSET_TOO_LARGE',
                     f'Media asset {asset_id!r} must be between 1 byte and 20 MB.',
                 )
-            total_size += len(data)
-            if total_size > _MAX_WRITE_ASSET_BYTES:
-                raise GitHubFSError(
-                    'GITHUB_ASSET_TOO_LARGE',
-                    'GitHub Writer assets exceed the 50 MB per-write limit.',
-                )
             digest = hashlib.sha256(data).hexdigest()
             suffix = _image_suffix(data)
             filename = f'{digest[:2]}/{digest}{suffix}'
             relative_target = posixpath.join(document_dir, asset_dir, filename)
-            if relative_target in used_paths:
-                rewritten = rewritten.replace(
-                    marker,
-                    quote(posixpath.relpath(relative_target, document_dir or '.'), safe='/._-'),
-                )
-                continue
-            used_paths.add(relative_target)
-            files[relative_target] = data
+            if relative_target not in files:
+                total_size += len(data)
+                if total_size > _MAX_WRITE_ASSET_BYTES:
+                    raise GitHubFSError(
+                        'GITHUB_ASSET_TOO_LARGE',
+                        'GitHub Writer assets exceed the 50 MB per-write limit.',
+                    )
+                files[relative_target] = data
             link = posixpath.relpath(relative_target, document_dir or '.')
-            rewritten = rewritten.replace(marker, quote(link, safe='/._-'))
+            repository_reference = quote(link, safe='/._-')
+            rewritten = _rewrite_image_references(
+                rewritten,
+                {reference: repository_reference for reference in matched},
+            )
         return rewritten, files
+
+    @staticmethod
+    def _restore_html_image_layouts(
+        markdown: str,
+        target: TargetDocument,
+    ) -> str:
+        layouts = target.meta.get(_GITHUB_IMAGE_LAYOUT_META_KEY)
+        if not isinstance(layouts, list):
+            return markdown
+        restored = markdown
+        for layout in layouts:
+            if not isinstance(layout, Mapping):
+                continue
+            layout_id = str(layout.get('id') or '').strip()
+            source = str(layout.get('source') or '')
+            display = str(layout.get('display') or '')
+            body = str(layout.get('body') or '')
+            if not source:
+                continue
+            if layout_id:
+                marker = re.compile(
+                    re.escape(f'<!-- lazyllm-github-image-layout:{layout_id}:start -->')
+                    + r'.*?'
+                    + re.escape(f'<!-- lazyllm-github-image-layout:{layout_id}:end -->'),
+                    re.DOTALL,
+                )
+                restored, count = marker.subn(
+                    lambda _, source=source: source,
+                    restored,
+                    count=1,
+                )
+                if count:
+                    continue
+            for candidate in (display, body):
+                if candidate and candidate in restored:
+                    restored = restored.replace(candidate, source, 1)
+                    break
+        return restored
+
+    @staticmethod
+    def _restore_code_fences(
+        markdown: str,
+        target: TargetDocument,
+    ) -> str:
+        layouts = target.meta.get(_GITHUB_CODE_FENCE_META_KEY)
+        if not isinstance(layouts, list):
+            return markdown
+        restored = markdown
+        for layout in layouts:
+            if not isinstance(layout, Mapping):
+                continue
+            source = str(layout.get('source') or '')
+            display = str(layout.get('display') or '')
+            if source and display and display in restored:
+                restored = restored.replace(display, source, 1)
+        return restored
 
     @staticmethod
     def _restore_imported_media_references(
@@ -454,7 +830,7 @@ class GitHubWriterProvider(WriterProviderBase):
             lambda match: replace_url(match, image_only=True),
             markdown,
         )
-        return _HTML_MEDIA_RE.sub(
+        return _HTML_IMAGE_RE.sub(
             lambda match: replace_url(match, image_only=False),
             restored,
         )
