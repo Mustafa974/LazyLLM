@@ -296,6 +296,14 @@ def _matches_writer_preview(reference: str, digest: str) -> bool:
     return '/writer-preview-assets/' in path and digest in path
 
 
+def _unresolved_writer_preview_references(markdown: str) -> list[str]:
+    return sorted({
+        reference
+        for reference in _image_references(markdown)
+        if unquote(urlparse(reference).path).startswith('/static-files/')
+    })
+
+
 class GitHubWriterProvider(WriterProviderBase):
     """Keep GitHub repository and Wiki Writer documents as native Markdown."""
 
@@ -586,6 +594,11 @@ class GitHubWriterProvider(WriterProviderBase):
         markdown = self._restore_html_image_layouts(markdown, target)
         markdown = self._restore_code_fences(markdown, target)
         markdown, files = self._materialize_media(markdown, target, media_assets)
+        if _unresolved_writer_preview_references(markdown):
+            raise GitHubFSError(
+                'GITHUB_ASSET_INVALID',
+                'GitHub Writer output contains unresolved local image previews.',
+            )
         publish_mode = str(target.meta.get('publish_mode') or target.meta.get('write_mode') or '').strip()
         if not publish_mode:
             publish_mode = 'direct' if target_type == 'wiki' else 'pull_request'
@@ -795,10 +808,14 @@ class GitHubWriterProvider(WriterProviderBase):
         media_assets: MediaAssetLibrary,
     ) -> str:
         replacements: dict[str, str] = {}
+        digest_sources: dict[str, set[str]] = {}
         for asset in media_assets.assets.values():
             source_reference = str(asset.meta.get('source_reference') or '').strip()
             if not source_reference:
                 continue
+            digest = str(asset.meta.get('sha256') or '').strip().lower()
+            if re.fullmatch(r'[0-9a-f]{64}', digest):
+                digest_sources.setdefault(digest, set()).add(source_reference)
             for candidate in (
                 str(asset.local_path or '').strip(),
                 str(asset.meta.get('preview_reference') or '').strip(),
@@ -814,6 +831,15 @@ class GitHubWriterProvider(WriterProviderBase):
             token = str(match.group('url') or '')
             value = token.strip('<>')
             replacement = replacements.get(value)
+            if not replacement:
+                matched_sources = {
+                    source_reference
+                    for digest, sources in digest_sources.items()
+                    if _matches_writer_preview(value, digest)
+                    for source_reference in sources
+                }
+                if len(matched_sources) == 1:
+                    replacement = matched_sources.pop()
             if not replacement:
                 return match.group(0)
             if token.startswith('<') and token.endswith('>'):

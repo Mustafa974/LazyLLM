@@ -1,6 +1,9 @@
 import hashlib
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from lazyllm.tools.fs.supplier.github import GitHubFSError
 from lazyllm.tools.writer.data_models.multimodal import MediaAsset, MediaAssetLibrary
 from lazyllm.tools.writer.data_models.task import TargetDocument
 from lazyllm.tools.writer.provider import get_writer_provider, match_writer_provider
@@ -598,7 +601,13 @@ def test_replace_document_does_not_upload_preview_used_as_normal_link(tmp_path):
 
 def test_replace_document_restores_imported_image_reference(tmp_path):
     image = tmp_path / 'diagram.png'
-    image.write_bytes(b'preview-only')
+    image_data = b'preview-only'
+    image.write_bytes(image_data)
+    digest = hashlib.sha256(image_data).hexdigest()
+    preview_reference = (
+        f'/static-files/writer-preview-assets/{digest[:2]}/{digest}.png'
+        '?expires=123&sig=abc#writer-media-imported'
+    )
     library = MediaAssetLibrary(
         library_id='library-1',
         assets={
@@ -609,10 +618,8 @@ def test_replace_document_restores_imported_image_reference(tmp_path):
                 local_path=str(image),
                 meta={
                     'source_reference': './diagram.png',
-                    'preview_reference': (
-                        '/static-files/writer-preview-assets/aa/diagram.png'
-                        '?expires=123&sig=abc'
-                    ),
+                    'preview_reference': preview_reference,
+                    'sha256': digest,
                 },
             ),
         },
@@ -620,14 +627,32 @@ def test_replace_document_restores_imported_image_reference(tmp_path):
     target = GitHubWriterProvider._target_from_resolved(_resolved_target())
 
     markdown, files = GitHubWriterProvider()._materialize_media(
-        '![diagram](/static-files/writer-preview-assets/aa/diagram.png'
-        '?expires=123&sig=abc)',
+        f'![diagram](/static-files/writer-preview-assets/{digest[:2]}/{digest}.png'
+        '?expires=999&sig=changed)',
         target,
         library,
     )
 
     assert markdown == '![diagram](./diagram.png)'
     assert files == {}
+
+
+def test_replace_document_rejects_unresolved_local_image_preview():
+    fs = MagicMock()
+    provider = GitHubWriterProvider()
+    target = GitHubWriterProvider._target_from_resolved(_resolved_target())
+
+    with (
+        patch.object(provider, '_fs', return_value=fs),
+        pytest.raises(GitHubFSError) as exc_info,
+    ):
+        provider.replace_document(
+            '# Guide\n\n![diagram](/static-files/writer-preview-assets/missing.png)\n',
+            target,
+        )
+
+    assert exc_info.value.code == 'GITHUB_ASSET_INVALID'
+    fs.apply_document_patch.assert_not_called()
 
 
 def test_text_only_write_restores_imported_html_layout_and_repository_image_reference():
