@@ -155,3 +155,23 @@ def test_wiki_document_patch_returns_commit(tmp_path):
     )
 
     assert result['commit_sha'] == 'commit-2'
+
+
+def test_wiki_create_flow_resolves_root_and_new_page(tmp_path):
+    fs = GitHubWikiFS(token='wiki-create-test-token', skip_instance_cache=True)
+    fs._repository = MagicMock(return_value={
+        'has_wiki': True,
+        'permissions': {'push': True},
+    })
+    fs._clone = MagicMock(return_value=tmp_path)
+    fs._git = MagicMock(side_effect=['commit-1', 'master', 'commit-1'])
+
+    parent = fs.resolve_create_parent('https://github.com/acme/docs/wiki')
+    target = fs.resolve_create_target(parent, '从零开始写文章')
+
+    assert parent['target_type'] == 'wiki'
+    assert parent['publish_mode'] == 'direct'
+    assert parent['create_pending'] is True
+    assert target['path'] == '从零开始写文章.md'
+    assert target['revision'] == 'commit-1'
+    assert target['uri'].startswith('githubwiki:/acme/docs/')

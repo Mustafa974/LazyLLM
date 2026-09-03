@@ -545,11 +545,15 @@ class GitHubWriterProvider(WriterProviderBase):
 
     def plan_document(self, parent_uri: str) -> TargetDocument:
         parent_uri = str(parent_uri or '').strip()
-        if not GitHubRepoFS.matches_create_parent(parent_uri):
+        if GitHubRepoFS.matches_create_parent(parent_uri):
+            fs = GitHubRepoFS(dynamic_auth=True)
+        elif GitHubWikiFS.matches_create_parent(parent_uri):
+            fs = GitHubWikiFS(dynamic_auth=True)
+        else:
             raise ValueError(
-                'GitHub plan_document requires a repository root or tree directory URL.',
+                'GitHub plan_document requires a repository root, tree directory, or Wiki root URL.',
             )
-        planned = GitHubRepoFS(dynamic_auth=True).resolve_create_parent(parent_uri)
+        planned = fs.resolve_create_parent(parent_uri)
         return self._target_from_resolved(planned)
 
     def replace_document(

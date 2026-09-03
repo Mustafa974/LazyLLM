@@ -94,6 +94,10 @@ def _repo_parent_browser_url(owner: str, repo: str, ref: str = '', directory: st
     return f'{base}/tree/{quote(ref, safe="/")}{suffix}'
 
 
+def _wiki_parent_browser_url(owner: str, repo: str) -> str:
+    return f'https://github.com/{quote(owner, safe="")}/{quote(repo, safe="")}/wiki'
+
+
 def _markdown_filename(title: str) -> str:
     name = re.sub(r'[\x00-\x1f\x7f/\\:*?"<>|]+', '-', str(title or '').strip())
     name = re.sub(r'\s+', '-', name)
@@ -954,7 +958,8 @@ class GitHubWikiFS(_GitHubFSBase):
     """Read and safely publish pages in a repository's separate Wiki Git repository."""
 
     __public_apis__ = LazyLLMFSBase.__public_apis__ + [
-        'resolve_target', 'apply_document_patch', 'create_document',
+        'resolve_target', 'resolve_create_parent', 'resolve_create_target',
+        'apply_document_patch', 'create_document',
     ]
 
     def _repository(self, owner: str, repo: str) -> dict[str, Any]:
@@ -963,6 +968,112 @@ class GitHubWikiFS(_GitHubFSBase):
             f'/repos/{quote(owner, safe="")}/{quote(repo, safe="")}',
             not_found_code='GITHUB_PERMISSION_DENIED',
         )
+
+    @classmethod
+    def matches_create_parent(cls, value: str) -> bool:
+        parsed = urlparse(clean_document_ref(str(value or '').strip()))
+        if parsed.scheme not in {'http', 'https'} or (parsed.hostname or '').lower() not in _GITHUB_HOSTS:
+            return False
+        parts = [part for part in parsed.path.split('/') if part]
+        return len(parts) == 3 and parts[2].lower() == 'wiki'
+
+    def _parse_create_parent(self, value: str) -> tuple[str, str, dict[str, Any]]:
+        parsed = urlparse(clean_document_ref(str(value or '').strip()))
+        if parsed.scheme not in {'http', 'https'} or (parsed.hostname or '').lower() not in _GITHUB_HOSTS:
+            raise ValueError('GitHub Wiki create parent must be a github.com Wiki root URL.')
+        parts = [unquote(part) for part in parsed.path.split('/') if part]
+        if len(parts) != 3 or parts[2].lower() != 'wiki':
+            raise ValueError('GitHub Wiki create parent must use /{owner}/{repo}/wiki.')
+        owner = _validate_repo_part(parts[0], 'owner')
+        repo_value = parts[1][:-4] if parts[1].lower().endswith('.git') else parts[1]
+        repo = _validate_repo_part(repo_value, 'repository')
+        return owner, repo, self._repository(owner, repo)
+
+    def resolve_create_parent(self, parent: str) -> dict[str, Any]:
+        owner, repo, repository = self._parse_create_parent(parent)
+        permissions = repository.get('permissions')
+        if isinstance(permissions, Mapping) and permissions.get('push') is False:
+            raise GitHubFSError(
+                'GITHUB_PERMISSION_DENIED',
+                'The current GitHub account cannot create pages in this Wiki.',
+                status_code=403,
+            )
+        if repository.get('has_wiki') is False:
+            raise GitHubFSError(
+                'GITHUB_WIKI_NOT_FOUND',
+                'GitHub Wiki is not enabled for this repository.',
+                status_code=404,
+            )
+        with tempfile.TemporaryDirectory(prefix='lazyllm-github-wiki-') as root:
+            checkout = self._clone(owner, repo, root)
+            revision = self._git(['rev-parse', 'HEAD'], cwd=str(checkout))
+            branch = self._git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=str(checkout))
+        browser_url = _wiki_parent_browser_url(owner, repo)
+        return {
+            'uri': browser_url,
+            'browser_url': browser_url,
+            'owner': owner,
+            'repo': repo,
+            'ref': branch,
+            'base_ref': branch,
+            'directory': '',
+            'revision': revision,
+            'target_type': 'wiki',
+            'fs_scheme': 'githubwiki',
+            'publish_mode': 'direct',
+            'create_pending': True,
+            'parent_uri': str(parent or '').strip(),
+        }
+
+    def resolve_create_target(
+        self,
+        parent: Mapping[str, Any],
+        title: str,
+    ) -> dict[str, Any]:
+        owner = _validate_repo_part(str(parent.get('owner') or ''), 'owner')
+        repo = _validate_repo_part(str(parent.get('repo') or ''), 'repository')
+        revision = str(parent.get('revision') or '').strip()
+        if not revision:
+            raise GitHubFSError(
+                'GITHUB_TARGET_INVALID',
+                'Pending GitHub Wiki target is missing its revision.',
+                status_code=400,
+            )
+        page_path = _markdown_filename(title)
+        with tempfile.TemporaryDirectory(prefix='lazyllm-github-wiki-') as root:
+            checkout = self._clone(owner, repo, root)
+            current = self._git(['rev-parse', 'HEAD'], cwd=str(checkout))
+            if current != revision:
+                raise GitHubFSError(
+                    'GITHUB_REVISION_CONFLICT',
+                    'GitHub Wiki changed after the target was selected.',
+                    status_code=409,
+                )
+            if (checkout / page_path).exists():
+                raise GitHubFSError(
+                    'GITHUB_TARGET_EXISTS',
+                    f'GitHub Wiki page already exists: {page_path}.',
+                    status_code=409,
+                )
+        branch = str(parent.get('base_ref') or parent.get('ref') or '').strip()
+        return {
+            'doc_id': f'{owner}/{repo}.wiki:{page_path}',
+            'uri': _wiki_uri(owner, repo, page_path),
+            'browser_url': _wiki_browser_url(owner, repo, page_path),
+            'title': PurePosixPath(page_path).stem,
+            'owner': owner,
+            'repo': repo,
+            'ref': branch,
+            'base_ref': branch,
+            'path': page_path,
+            'directory': '',
+            'revision': revision,
+            'target_type': 'wiki',
+            'fs_scheme': 'githubwiki',
+            'publish_mode': 'direct',
+            'create_pending': False,
+            'parent_uri': str(parent.get('parent_uri') or parent.get('uri') or ''),
+        }
 
     def _parse_target(
         self,

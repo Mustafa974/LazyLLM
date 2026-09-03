@@ -231,6 +231,57 @@ def test_plan_and_create_document_writes_final_file_once():
     assert target.meta['work_branch'] == 'lazymind/op'
 
 
+def test_plan_and_create_wiki_document_uses_direct_commit():
+    fs = MagicMock()
+    fs.resolve_create_parent.return_value = {
+        'uri': 'https://github.com/acme/docs/wiki',
+        'browser_url': 'https://github.com/acme/docs/wiki',
+        'owner': 'acme',
+        'repo': 'docs',
+        'ref': 'master',
+        'base_ref': 'master',
+        'revision': 'commit-1',
+        'target_type': 'wiki',
+        'publish_mode': 'direct',
+        'create_pending': True,
+    }
+    fs.resolve_create_target.return_value = {
+        **fs.resolve_create_parent.return_value,
+        'doc_id': 'acme/docs.wiki:New-Page.md',
+        'uri': 'githubwiki:/acme/docs/New-Page.md',
+        'browser_url': 'https://github.com/acme/docs/wiki/New-Page',
+        'title': 'New-Page',
+        'path': 'New-Page.md',
+        'create_pending': False,
+    }
+    fs.apply_document_patch.return_value = {
+        'success': True,
+        'provider': 'github',
+        'target_type': 'wiki',
+        'uri': 'githubwiki:/acme/docs/New-Page.md',
+        'revision': 'commit-2',
+        'commit_sha': 'commit-2',
+        'publish_mode': 'direct',
+        'warnings': [],
+    }
+    provider = GitHubWriterProvider()
+
+    with (
+        patch('lazyllm.tools.writer.provider.github.GitHubRepoFS') as repo_type,
+        patch('lazyllm.tools.writer.provider.github.GitHubWikiFS') as wiki_type,
+    ):
+        repo_type.matches_create_parent.return_value = False
+        wiki_type.matches_create_parent.return_value = True
+        wiki_type.return_value = fs
+        target = provider.plan_document('https://github.com/acme/docs/wiki')
+        provider.replace_document('# New Page\n\nFinal body.\n', target)
+
+    assert target.meta['target_type'] == 'wiki'
+    assert target.meta['publish_mode'] == 'direct'
+    fs.resolve_create_parent.assert_called_once_with('https://github.com/acme/docs/wiki')
+    assert fs.apply_document_patch.call_args.kwargs['publish_mode'] == 'direct'
+
+
 def test_generated_image_is_uploaded_with_markdown_in_same_patch(tmp_path):
     image = tmp_path / 'generated.png'
     image_data = b'\x89PNG\r\n\x1a\nwriter-generated-image'
