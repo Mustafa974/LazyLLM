@@ -212,7 +212,7 @@ def test_load_document_keeps_main_document_when_one_image_fails():
     ]
 
 
-def test_code_fences_round_trip_without_normalization():
+def test_unknown_code_fences_are_plain_text_in_writer_and_restored_on_writeback():
     markdown = (
         '# Original\n\n'
         '```bash\necho supported\n```\n\n'
@@ -244,11 +244,29 @@ def test_code_fences_round_trip_without_normalization():
             writer_markdown.replace('# Original', '# Changed'), target,
         )
 
-    assert writer_markdown == markdown
-    assert 'github_writer_code_fences' not in target.meta
+    assert '```bash\necho supported' in writer_markdown
+    assert '```mermaid' not in writer_markdown
+    assert '```go' not in writer_markdown
+    assert '```java' not in writer_markdown
+    assert writer_markdown.count('```text') == 3
+    assert [
+        item['language'] for item in target.meta['github_writer_code_fences']
+    ] == ['mermaid', 'go', 'java']
     assert fs.apply_document_patch.call_args.args[1] == markdown.replace(
         '# Original', '# Changed',
     )
+
+
+def test_changed_unknown_code_fence_is_not_restored_as_original():
+    provider = GitHubWriterProvider()
+    target = GitHubWriterProvider._target_from_resolved(_resolved_target())
+    normalized = provider.normalize_code_fences_for_writer(
+        '```mermaid\nA --> B\n```\n', target,
+    )
+
+    changed = normalized.replace('A --> B', 'A --> C')
+
+    assert provider._restore_code_fences(changed, target) == changed
 
 
 def test_load_document_keeps_pr_continuation_metadata():
