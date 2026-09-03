@@ -56,24 +56,6 @@ _HTML_IMAGE_LAYOUT_PATTERNS = (
     re.compile(r'<p\b[^>]*>.*?<img\b.*?</p>', re.IGNORECASE | re.DOTALL),
 )
 _GITHUB_IMAGE_LAYOUT_META_KEY = 'github_writer_image_layouts'
-_GITHUB_CODE_FENCE_META_KEY = 'github_writer_code_fences'
-_WRITER_MARKDOWN_CODE_LANGUAGES = frozenset({
-    'bash',
-    'css',
-    'html',
-    'javascript',
-    'json',
-    'markdown',
-    'python',
-    'sql',
-    'text',
-    'typescript',
-    'yaml',
-})
-_CODE_FENCE_OPEN_RE = re.compile(
-    r'^(?P<indent>[ \t]{0,3})(?P<fence>`{3,}|~{3,})'
-    r'(?P<info>[^\r\n]*)(?P<newline>\r?\n|$)',
-)
 _MAX_ASSET_BYTES = 20 * 1024 * 1024
 _MAX_WRITE_ASSET_BYTES = 50 * 1024 * 1024
 
@@ -186,59 +168,6 @@ def _normalize_html_image_layouts(markdown: str) -> tuple[str, list[dict[str, st
 
     normalized = _MARKDOWN_LINKED_IMAGE_RE.sub(replace_linked_image, normalized)
     return normalized, layouts
-
-
-def _normalize_code_fences(markdown: str) -> tuple[str, list[dict[str, str]]]:
-    lines = markdown.splitlines(keepends=True)
-    normalized: list[str] = []
-    layouts: list[dict[str, str]] = []
-    index = 0
-    while index < len(lines):
-        opening = _CODE_FENCE_OPEN_RE.match(lines[index])
-        if opening is None:
-            normalized.append(lines[index])
-            index += 1
-            continue
-
-        fence = opening.group('fence')
-        closing_re = re.compile(
-            rf'^[ \t]{{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*(?:\r?\n|$)',
-        )
-        end = index + 1
-        while end < len(lines) and closing_re.match(lines[end]) is None:
-            end += 1
-        if end < len(lines):
-            end += 1
-
-        info = opening.group('info')
-        info_match = re.match(
-            r'(?P<leading>[ \t]*)(?P<language>\S+)(?P<rest>.*)', info,
-        )
-        if info_match is None or info_match.group('language') in _WRITER_MARKDOWN_CODE_LANGUAGES:
-            normalized.extend(lines[index:end])
-            index = end
-            continue
-
-        display_info = (
-            f"{info_match.group('leading')}text{info_match.group('rest')}"
-        )
-        display_opening = (
-            f"{opening.group('indent')}{fence}{display_info}{opening.group('newline')}"
-        )
-        source = ''.join(lines[index:end])
-        display = display_opening + ''.join(lines[index + 1:end])
-        layout_id = hashlib.sha256(
-            f'{len(layouts)}:{source}'.encode(),
-        ).hexdigest()[:16]
-        layouts.append({
-            'id': layout_id,
-            'language': info_match.group('language'),
-            'source': source,
-            'display': display,
-        })
-        normalized.append(display)
-        index = end
-    return ''.join(normalized), layouts
 
 
 def _image_references(markdown: str) -> set[str]:
@@ -387,9 +316,6 @@ class GitHubWriterProvider(WriterProviderBase):
             resolved_target.meta[_GITHUB_IMAGE_LAYOUT_META_KEY] = image_layouts
         else:
             resolved_target.meta.pop(_GITHUB_IMAGE_LAYOUT_META_KEY, None)
-        writer_markdown = self.normalize_code_fences_for_writer(
-            writer_markdown, resolved_target, replace_existing=True,
-        )
         return {
             'representation': 'markdown',
             'source_document': writer_markdown,
@@ -399,32 +325,6 @@ class GitHubWriterProvider(WriterProviderBase):
             'input_resources': resources,
             'resource_warnings': warnings,
         }
-
-    @staticmethod
-    def normalize_code_fences_for_writer(
-        markdown: str,
-        target: TargetDocument,
-        *,
-        replace_existing: bool = False,
-    ) -> str:
-        normalized, layouts = _normalize_code_fences(markdown)
-        existing = [] if replace_existing else target.meta.get(_GITHUB_CODE_FENCE_META_KEY)
-        merged = [item for item in existing or [] if isinstance(item, Mapping)]
-        existing_counts: dict[tuple[str, str], int] = {}
-        for item in merged:
-            identity = (str(item.get('source') or ''), str(item.get('display') or ''))
-            existing_counts[identity] = existing_counts.get(identity, 0) + 1
-        incoming_counts: dict[tuple[str, str], int] = {}
-        for layout in layouts:
-            identity = (layout['source'], layout['display'])
-            incoming_counts[identity] = incoming_counts.get(identity, 0) + 1
-            if incoming_counts[identity] > existing_counts.get(identity, 0):
-                merged.append(layout)
-        if merged:
-            target.meta[_GITHUB_CODE_FENCE_META_KEY] = merged
-        elif replace_existing:
-            target.meta.pop(_GITHUB_CODE_FENCE_META_KEY, None)
-        return normalized
 
     def _collect_referenced_resources(
         self,
@@ -596,7 +496,6 @@ class GitHubWriterProvider(WriterProviderBase):
         if media_assets is not None:
             markdown = self._restore_imported_media_references(markdown, media_assets)
         markdown = self._restore_html_image_layouts(markdown, target)
-        markdown = self._restore_code_fences(markdown, target)
         markdown, files = self._materialize_media(markdown, target, media_assets)
         if _unresolved_writer_preview_references(markdown):
             raise GitHubFSError(
@@ -786,24 +685,6 @@ class GitHubWriterProvider(WriterProviderBase):
                 if candidate and candidate in restored:
                     restored = restored.replace(candidate, source, 1)
                     break
-        return restored
-
-    @staticmethod
-    def _restore_code_fences(
-        markdown: str,
-        target: TargetDocument,
-    ) -> str:
-        layouts = target.meta.get(_GITHUB_CODE_FENCE_META_KEY)
-        if not isinstance(layouts, list):
-            return markdown
-        restored = markdown
-        for layout in layouts:
-            if not isinstance(layout, Mapping):
-                continue
-            source = str(layout.get('source') or '')
-            display = str(layout.get('display') or '')
-            if source and display and display in restored:
-                restored = restored.replace(display, source, 1)
         return restored
 
     @staticmethod

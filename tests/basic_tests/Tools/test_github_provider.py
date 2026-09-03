@@ -212,12 +212,13 @@ def test_load_document_keeps_main_document_when_one_image_fails():
     ]
 
 
-def test_unknown_code_fences_are_plain_text_in_writer_and_restored_on_writeback():
+def test_code_fences_round_trip_without_normalization():
     markdown = (
         '# Original\n\n'
         '```bash\necho supported\n```\n\n'
         '```mermaid\nflowchart LR\nA --> B\n```\n\n'
-        '```powershell\nWrite-Host "hello"\n```\n'
+        '```go\npackage main\n```\n\n'
+        '```java\nclass Main {}\n```\n'
     )
     fs = MagicMock()
     fs.resolve_target.return_value = _resolved_target()
@@ -243,41 +244,11 @@ def test_unknown_code_fences_are_plain_text_in_writer_and_restored_on_writeback(
             writer_markdown.replace('# Original', '# Changed'), target,
         )
 
-    assert '```bash\necho supported' in writer_markdown
-    assert '```mermaid' not in writer_markdown
-    assert '```powershell' not in writer_markdown
-    assert writer_markdown.count('```text') == 2
-    assert [
-        item['language'] for item in target.meta['github_writer_code_fences']
-    ] == ['mermaid', 'powershell']
+    assert writer_markdown == markdown
+    assert 'github_writer_code_fences' not in target.meta
     assert fs.apply_document_patch.call_args.args[1] == markdown.replace(
         '# Original', '# Changed',
     )
-
-
-def test_changed_unknown_code_fence_is_not_restored_as_the_original_language():
-    provider = GitHubWriterProvider()
-    target = GitHubWriterProvider._target_from_resolved(_resolved_target())
-    normalized = provider.normalize_code_fences_for_writer(
-        '```mermaid\nA --> B\n```\n', target,
-    )
-
-    changed = normalized.replace('A --> B', 'A --> C')
-
-    assert provider._restore_code_fences(changed, target) == changed
-
-
-def test_duplicate_unknown_code_fences_are_all_restored():
-    provider = GitHubWriterProvider()
-    target = GitHubWriterProvider._target_from_resolved(_resolved_target())
-    source = '```mermaid\nA --> B\n```\n'
-    markdown = f'{source}\n{source}'
-
-    normalized = provider.normalize_code_fences_for_writer(markdown, target)
-
-    assert normalized.count('```text') == 2
-    assert len(target.meta['github_writer_code_fences']) == 2
-    assert provider._restore_code_fences(normalized, target) == markdown
 
 
 def test_load_document_keeps_pr_continuation_metadata():
