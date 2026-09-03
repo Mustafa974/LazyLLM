@@ -23,7 +23,6 @@ class WriterResourceTools(WriterToolBase):
         'load_document',
         'document_to_docir',
         'create_document',
-        'plan_document',
         'write_to_document',
         'append_to_document',
         'replace_document',
@@ -272,28 +271,6 @@ class WriterResourceTools(WriterToolBase):
             extra={
                 'adapter': adapter,
                 'document_id': document_id,
-                'uri': target.uri,
-            },
-        ).model_dump()
-
-    def plan_document(self, parent_uri: str, adapter: str) -> dict:
-        '''Validate and save a provider target without creating remote content.'''
-        parent_uri = (parent_uri or '').strip()
-        if not parent_uri:
-            raise ValueError('parent_uri is required')
-        adapter = (adapter or '').strip().lower()
-        if not adapter:
-            raise ValueError('adapter is required')
-        target = get_writer_provider(adapter, adapters=self.adapters).plan_document(parent_uri)
-        return self._save_artifacts(
-            {'target_document': target},
-            step_name='plan_document',
-            primary_key='target_document',
-            context_key=None,
-            summary='Validated a future provider document target.',
-            counts={'documents': 1},
-            extra={
-                'adapter': adapter,
                 'uri': target.uri,
             },
         ).model_dump()

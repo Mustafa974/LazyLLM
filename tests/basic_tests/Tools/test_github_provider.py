@@ -311,7 +311,7 @@ def test_replace_document_passes_final_markdown_and_provider_result():
     assert target.uri.endswith('ref=lazymind%2Fop')
 
 
-def test_plan_document_validates_target_without_creating_remote_content():
+def test_resolve_create_target_validates_without_creating_remote_content():
     fs = MagicMock()
     fs.resolve_create_parent.return_value = {
         'uri': 'https://github.com/acme/docs/tree/main/articles',
@@ -330,7 +330,7 @@ def test_plan_document_validates_target_without_creating_remote_content():
     with patch('lazyllm.tools.writer.provider.github.GitHubRepoFS') as fs_type:
         fs_type.matches_create_parent.return_value = True
         fs_type.return_value = fs
-        target = provider.plan_document(
+        target = provider._resolve_create_target(
             'https://github.com/acme/docs/tree/main/articles',
         )
 
@@ -382,7 +382,7 @@ def test_plan_and_create_wiki_document_uses_direct_commit():
         repo_type.matches_create_parent.return_value = False
         wiki_type.matches_create_parent.return_value = True
         wiki_type.return_value = fs
-        target = provider.plan_document('https://github.com/acme/docs/wiki')
+        target = provider._resolve_create_target('https://github.com/acme/docs/wiki')
         provider.replace_document('# New Page\n\nFinal body.\n', target)
 
     assert target.meta['target_type'] == 'wiki'

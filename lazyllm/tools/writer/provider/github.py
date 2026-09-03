@@ -443,7 +443,7 @@ class GitHubWriterProvider(WriterProviderBase):
         )
         return self._target_from_resolved(created)
 
-    def plan_document(self, parent_uri: str) -> TargetDocument:
+    def _resolve_create_target(self, parent_uri: str) -> TargetDocument:
         parent_uri = str(parent_uri or '').strip()
         if GitHubRepoFS.matches_create_parent(parent_uri):
             fs = GitHubRepoFS(dynamic_auth=True)
@@ -451,7 +451,7 @@ class GitHubWriterProvider(WriterProviderBase):
             fs = GitHubWikiFS(dynamic_auth=True)
         else:
             raise ValueError(
-                'GitHub plan_document requires a repository root, tree directory, or Wiki root URL.',
+                'GitHub document creation requires a repository root, tree directory, or Wiki root URL.',
             )
         planned = fs.resolve_create_parent(parent_uri)
         return self._target_from_resolved(planned)

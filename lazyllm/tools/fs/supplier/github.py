@@ -584,6 +584,29 @@ class GitHubRepoFS(_GitHubFSBase):
             not_found_code='GITHUB_TARGET_NOT_FOUND',
         )
 
+    def _content_sha(self, owner: str, repo: str, path: str, ref: str) -> str | None:
+        try:
+            content = self._content(owner, repo, path, ref)
+        except GitHubFSError as exc:
+            if exc.code == 'GITHUB_TARGET_NOT_FOUND':
+                return None
+            raise
+        return str(content.get('sha') or '')
+
+    def _paths_unchanged(
+        self,
+        owner: str,
+        repo: str,
+        paths: list[str],
+        old_revision: str,
+        new_revision: str,
+    ) -> bool:
+        return all(
+            self._content_sha(owner, repo, path, old_revision)
+            == self._content_sha(owner, repo, path, new_revision)
+            for path in paths
+        )
+
     def read_bytes(self, path: str) -> bytes:
         owner, repo, ref, repo_path = self._parse_target(path)
         data = self._content(owner, repo, repo_path, ref)
@@ -833,23 +856,33 @@ class GitHubRepoFS(_GitHubFSBase):
         warnings: list[str] = []
         target_branch = document_ref
         branch_existed = False
+        base_update_allowed = False
         if mode == 'pull_request':
             target_branch = work_branch.strip() or self._operation_branch(operation_id)
             current = self._branch_head(owner, repo, target_branch, missing_ok=True)
             branch_existed = current is not None
             if current is None:
                 current = self._branch_head(owner, repo, pull_request_base)
-                if expected_revision and current != expected_revision:
+                if expected_revision and current != expected_revision and not self._paths_unchanged(
+                    owner,
+                    repo,
+                    list(all_files),
+                    expected_revision,
+                    current,
+                ):
                     raise GitHubFSError(
                         'GITHUB_REVISION_CONFLICT',
                         'GitHub branch changed after the document was loaded.',
                         status_code=409,
                     )
+                base_update_allowed = bool(expected_revision and current != expected_revision)
                 self._create_ref(owner, repo, target_branch, current)
         else:
             current = self._branch_head(owner, repo, document_ref)
 
-        possible_retry = branch_existed or bool(expected_revision and current != expected_revision)
+        possible_retry = branch_existed or (
+            mode == 'direct' and bool(expected_revision and current != expected_revision)
+        )
         if possible_retry and self._commit_has_operation(
             owner, repo, str(current), operation_id,
         ):
@@ -874,7 +907,7 @@ class GitHubRepoFS(_GitHubFSBase):
                 pr=pr,
             )
 
-        if expected_revision and current != expected_revision:
+        if expected_revision and current != expected_revision and not base_update_allowed:
             raise GitHubFSError(
                 'GITHUB_REVISION_CONFLICT',
                 'GitHub branch changed after the document was loaded.',

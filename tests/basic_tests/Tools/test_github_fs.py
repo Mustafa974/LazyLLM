@@ -174,9 +174,13 @@ def test_repo_document_patch_rejects_stale_revision():
     assert captured.value.code == 'GITHUB_REVISION_CONFLICT'
 
 
-def test_repo_pr_patch_does_not_create_branch_from_stale_base():
+def test_repo_pr_patch_does_not_create_branch_when_target_changed():
     fs = GitHubRepoFS(token='stale-pr-test-token', skip_instance_cache=True)
     fs._branch_head = MagicMock(side_effect=[None, 'new-base-head'])
+    fs._content = MagicMock(side_effect=[
+        {'sha': 'old-blob'},
+        {'sha': 'new-blob'},
+    ])
     fs._create_ref = MagicMock()
 
     with pytest.raises(GitHubFSError) as captured:
@@ -189,6 +193,41 @@ def test_repo_pr_patch_does_not_create_branch_from_stale_base():
 
     assert captured.value.code == 'GITHUB_REVISION_CONFLICT'
     fs._create_ref.assert_not_called()
+
+
+@pytest.mark.parametrize('path_exists', [True, False], ids=['same-file', 'new-file'])
+def test_repo_pr_patch_uses_latest_base_when_target_unchanged(path_exists):
+    fs = GitHubRepoFS(token='updated-base-test-token', skip_instance_cache=True)
+    fs._branch_head = MagicMock(side_effect=[None, 'new-base-head'])
+    if path_exists:
+        fs._content = MagicMock(side_effect=[
+            {'sha': 'same-blob'},
+            {'sha': 'same-blob'},
+        ])
+    else:
+        missing = GitHubFSError(
+            'GITHUB_TARGET_NOT_FOUND', 'Not Found', status_code=404,
+        )
+        fs._content = MagicMock(side_effect=[missing, missing])
+    fs._create_ref = MagicMock()
+    fs._commit_files = MagicMock(return_value='commit-2')
+    fs._update_ref = MagicMock()
+    fs._ensure_pr = MagicMock(return_value={
+        'number': 7,
+        'html_url': 'https://github.com/acme/docs/pull/7',
+    })
+
+    result = fs.apply_document_patch(
+        'githubrepo:/acme/docs/guide.md?ref=main',
+        '# Updated',
+        expected_revision='old-base-head',
+        operation_id='operation-1',
+    )
+
+    fs._create_ref.assert_called_once_with(
+        'acme', 'docs', 'lazymind/operation-1', 'new-base-head',
+    )
+    assert result['pull_request_number'] == 7
 
 
 def test_repo_document_patch_returns_normalized_pr_result():
