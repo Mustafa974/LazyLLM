@@ -2687,40 +2687,40 @@ _add_fs_example('S3FS', '''\
 
 # ObsidianFS
 _add_fs_chinese('ObsidianFS', '''\
-本地 Obsidian 仓库（Vault）文件系统：将本机磁盘上的 Obsidian 笔记目录映射为 FS 接口，支持 ls、info、读写、mkdir、rm、递归删除等。路径为相对 Vault 根目录的逻辑路径（如 Daily/note.md）。不依赖网络；token 填 Vault 根目录的绝对或相对路径。
+本地 Obsidian 仓库（Vault）文件系统：将本机磁盘上的 Obsidian 笔记目录映射为 FS 接口，支持 ls、info、读写、mkdir、rm、递归删除等。token 可填单个 Vault 根目录，也可填扫描根目录；扫描根下任意包含 .obsidian 目录的文件夹都会被 Writer Provider 识别为 Vault。单个 Vault 模式下，路径为相对 Vault 根目录的逻辑路径（如 Daily/note.md）。不依赖网络。
 
 Args:
-    token (str): Vault 根目录路径；可为绝对路径或相对路径（相对当前工作目录），默认 '.' 表示当前目录。
+    token (str): 单个 Vault 根目录或 Vault 扫描根目录；可为绝对路径或相对路径（相对当前工作目录），默认 '.' 表示当前目录。
     base_url (str, optional): 未使用，保留兼容。
     asynchronous (bool): 是否启用异步模式（高级用法，通常无需修改）。
     use_listings_cache (bool): 是否缓存目录列表（高级用法，通常无需修改）。
     skip_instance_cache (bool): 是否跳过实例缓存（高级用法，通常无需修改）。
     loop (Any, optional): 异步事件循环对象（高级用法）。
 
-认证与配置: 无需 API 认证；构造时传入 token 作为 Vault 路径即可。若路径不是已存在的目录，_setup_auth 会抛出 FileNotFoundError。
-环境变量（CloudFS 选用 obsidian 时）: OBSIDIAN_VAULT_PATH、OBSIDIAN_VAULT；非空值作为 token（Vault 路径）使用。
+认证与配置: 无需 API 认证；构造时传入 token 作为 Vault 或扫描根路径即可。若路径不是已存在的目录，_setup_auth 会抛出 FileNotFoundError。
+环境变量（CloudFS 选用 obsidian 时）: OBSIDIAN_VAULT_PATH；非空值作为 token 使用。
 
 使用说明:
-    1. 确保 Vault 路径存在且为目录（可在 Obsidian 中打开该仓库，复制其路径）。
-    2. 通过 CloudFS(platform='obsidian', token='/path/to/vault') 或设置 OBSIDIAN_VAULT_PATH 后 CloudFS(platform='obsidian') 使用。
+    1. 确保单个 Vault 或扫描根路径存在且为目录。
+    2. 单个 Vault 可通过 CloudFS(platform='obsidian', token='/path/to/vault') 使用；Writer Provider 也可通过设置 OBSIDIAN_VAULT_PATH 为扫描根来发现多个 Vault，并以 obsidian:// URI 定位笔记。
 ''')
 _add_fs_english('ObsidianFS', '''\
-Local Obsidian vault filesystem: maps an Obsidian vault directory on disk to the FS interface; supports ls, info, read/write, mkdir, rm, and recursive delete. Paths are logical paths relative to the vault root (e.g. Daily/note.md). No network; token is the vault root path (absolute or relative).
+Local Obsidian vault filesystem: maps Obsidian notes on disk to the FS interface; supports ls, info, read/write, mkdir, rm, and recursive delete. The token can be one Vault root or a scan root; Writer Provider discovers every directory containing .obsidian below a scan root. In single-Vault mode, paths are logical paths relative to that Vault root (for example, Daily/note.md). No network is required.
 
 Args:
-    token (str): Vault root directory path; absolute or relative to cwd; default '.' for current directory.
+    token (str): One Vault root or a Vault scan-root directory path; absolute or relative to cwd; default '.' for current directory.
     base_url (str, optional): Unused; kept for compatibility.
     asynchronous (bool): Advanced async mode flag; usually not needed.
     use_listings_cache (bool): Advanced flag to cache directory listings; usually not needed.
     skip_instance_cache (bool): Advanced flag to skip instance cache; usually not needed.
     loop (Any, optional): Event loop for async environments.
 
-Auth and config: No API auth; pass token as vault path. If the path is not an existing directory, _setup_auth raises FileNotFoundError.
-Env vars (when CloudFS uses obsidian): OBSIDIAN_VAULT_PATH, OBSIDIAN_VAULT; non-empty value used as token (vault path).
+Auth and config: No API auth; pass token as a Vault or scan-root path. If the path is not an existing directory, _setup_auth raises FileNotFoundError.
+Env vars (when CloudFS uses obsidian): OBSIDIAN_VAULT_PATH; a non-empty value is used as the token.
 
 Usage:
-    1. Ensure the vault path exists and is a directory (e.g. copy path from Obsidian).
-    2. Use CloudFS(platform='obsidian', token='/path/to/vault') or set OBSIDIAN_VAULT_PATH and call CloudFS(platform='obsidian').
+    1. Ensure the Vault or scan-root path exists and is a directory.
+    2. Use CloudFS(platform='obsidian', token='/path/to/vault') for a single Vault. For multiple Vaults, set OBSIDIAN_VAULT_PATH to a scan root and let Writer Provider address notes through obsidian:// URIs.
 ''')
 _add_fs_example('ObsidianFS', '''\
 >>> from lazyllm.tools.fs import ObsidianFS

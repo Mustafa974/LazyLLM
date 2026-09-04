@@ -1,4 +1,5 @@
 from copy import deepcopy
+from unittest.mock import MagicMock
 
 from lazyllm.tools.writer.adapter.feishu import FeishuWriterAdapter
 from lazyllm.tools.writer.data_models import (
@@ -9,6 +10,7 @@ from lazyllm.tools.writer.data_models import (
     WriterSpan,
 )
 from lazyllm.tools.writer.utils.feishu_docx import prepare_docx_clone_descendants
+from lazyllm.tools.writer.provider.obsidian import ObsidianWriterProvider
 
 
 def _block(block_id, content, *, parent='doc-1', children=None, heading=False):
@@ -161,6 +163,18 @@ def test_move_uses_parent_and_final_index():
         'target_parent_block_id': 'heading-2',
         'target_index': 1,
     }
+
+
+def test_obsidian_write_back_drops_writer_system_anchors():
+    restored = ObsidianWriterProvider()._from_writer_markdown(
+        '# Title\n\n<a id="block-sec-001"></a>\n## Section\n',
+        {},
+        None,
+        MagicMock(),
+        None,
+    )
+
+    assert restored == '# Title\n\n## Section\n'
 
 
 def test_merge_refreshed_move_restores_writer_identity():
