@@ -383,7 +383,7 @@ class GitHubWriterProvider(WriterProviderBase):
         target_type = self._target_type(target)
         fs = self._fs(target_type)
         locator = self._locator(target)
-        if isinstance(fs, GitHubWikiFS):
+        if target_type == 'wiki':
             with fs.read_session(locator) as (resolved, read_bytes):
                 return self._load_resolved_document(target, resolved, read_bytes)
         resolved = fs.resolve_target(locator)
