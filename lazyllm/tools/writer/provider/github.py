@@ -57,6 +57,7 @@ _HTML_IMAGE_LAYOUT_PATTERNS = (
 )
 _GITHUB_IMAGE_LAYOUT_META_KEY = 'github_writer_image_layouts'
 _GITHUB_CODE_FENCE_META_KEY = 'github_writer_code_fences'
+_GITHUB_MEDIA_ALIASES_META_KEY = 'github_writer_media_aliases'
 _WRITER_MARKDOWN_CODE_LANGUAGES = frozenset({
     'bash',
     'css',
@@ -712,6 +713,7 @@ class GitHubWriterProvider(WriterProviderBase):
         target_type = self._target_type(target)
         asset_dir = '_assets' if target_type == 'wiki' else 'assets'
         files: dict[str, bytes] = {}
+        media_aliases: dict[str, str] = {}
         rewritten = self._restore_imported_media_references(markdown, media_assets)
         total_size = 0
         for asset_id, asset in media_assets.assets.items():
@@ -739,6 +741,7 @@ class GitHubWriterProvider(WriterProviderBase):
                     reference
                     for reference in references
                     if _matches_writer_preview(reference, digest)
+                    or _matches_materialized_asset(reference, digest)
                 }
             if not matched:
                 continue
@@ -768,10 +771,15 @@ class GitHubWriterProvider(WriterProviderBase):
                 files[relative_target] = data
             link = posixpath.relpath(relative_target, document_dir or '.')
             repository_reference = quote(link, safe='/._-')
+            media_aliases[repository_reference] = asset_id
             rewritten = _rewrite_image_references(
                 rewritten,
                 {reference: repository_reference for reference in matched},
             )
+        if media_aliases:
+            target.meta[_GITHUB_MEDIA_ALIASES_META_KEY] = media_aliases
+        else:
+            target.meta.pop(_GITHUB_MEDIA_ALIASES_META_KEY, None)
         return rewritten, files
 
     @staticmethod

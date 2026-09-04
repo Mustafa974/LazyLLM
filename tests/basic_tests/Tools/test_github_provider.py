@@ -606,6 +606,9 @@ def test_replace_document_submits_generated_image_in_same_patch(tmp_path):
     assert fs.apply_document_patch.call_args.kwargs['files'] == {
         f'assets/{digest[:2]}/{digest}.png': image_data,
     }
+    assert target.meta['github_writer_media_aliases'] == {
+        expected_reference: 'generated-1',
+    }
 
 
 def test_replace_document_does_not_upload_preview_used_as_normal_link(tmp_path):
