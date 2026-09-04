@@ -476,6 +476,7 @@ class WriterMultimodalTools(WriterToolBase):
                     'caption': alt or None,
                     'source_type': 'input_resource',
                     'origin': 'markdown',
+                    'source_reference': uri,
                 },
             ))
         return resources

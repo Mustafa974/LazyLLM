@@ -51,6 +51,7 @@ def test_collect_available_media_downloads_markdown_images(tmp_path):
     download.assert_called_once_with('https://cdn.example.com/original.png')
     assert asset.uri == 'https://cdn.example.com/original.png'
     assert asset.meta['origin'] == 'markdown'
+    assert asset.meta['source_reference'] == 'https://cdn.example.com/original.png'
     assert Path(asset.local_path).is_file()
     assert any(resource.get('uri') == asset.uri for resource in resources)
     assert result['metadata']['warnings'] == []

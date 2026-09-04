@@ -296,6 +296,17 @@ def _matches_writer_preview(reference: str, digest: str) -> bool:
     return '/writer-preview-assets/' in path and digest in path
 
 
+def _matches_materialized_asset(reference: str, digest: str) -> bool:
+    if not digest or not re.fullmatch(r'[0-9a-f]{64}', digest):
+        return False
+    path = unquote(urlparse(reference).path).lower()
+    match = re.search(
+        r'(?:^|/)_?assets/[0-9a-f]{2}/(?P<digest>[0-9a-f]{64})\.[^/]+$',
+        path,
+    )
+    return bool(match and match.group('digest') == digest)
+
+
 def _unresolved_writer_preview_references(markdown: str) -> list[str]:
     return sorted({
         reference
@@ -678,6 +689,16 @@ class GitHubWriterProvider(WriterProviderBase):
         if operation_id:
             target.meta['last_operation_id'] = operation_id
 
+    @staticmethod
+    def _imported_media_source_reference(asset: object) -> str:
+        meta = asset.meta if isinstance(getattr(asset, 'meta', None), Mapping) else {}
+        source_reference = str(meta.get('source_reference') or '').strip()
+        if not source_reference and meta.get('origin') == 'markdown':
+            original_uri = str(getattr(asset, 'uri', '') or '').strip()
+            if urlparse(original_uri).scheme in {'http', 'https'}:
+                source_reference = original_uri
+        return source_reference
+
     def _materialize_media(
         self,
         markdown: str,
@@ -695,6 +716,9 @@ class GitHubWriterProvider(WriterProviderBase):
         total_size = 0
         for asset_id, asset in media_assets.assets.items():
             references = _image_references(rewritten)
+            source_reference = self._imported_media_source_reference(asset)
+            if source_reference and source_reference in references:
+                continue
             local_path = str(asset.local_path or '').strip()
             meta = asset.meta if isinstance(asset.meta, Mapping) else {}
             candidates = {
@@ -814,15 +838,16 @@ class GitHubWriterProvider(WriterProviderBase):
         replacements: dict[str, str] = {}
         digest_sources: dict[str, set[str]] = {}
         for asset in media_assets.assets.values():
-            source_reference = str(asset.meta.get('source_reference') or '').strip()
+            meta = asset.meta if isinstance(asset.meta, Mapping) else {}
+            source_reference = GitHubWriterProvider._imported_media_source_reference(asset)
             if not source_reference:
                 continue
-            digest = str(asset.meta.get('sha256') or '').strip().lower()
+            digest = str(meta.get('sha256') or '').strip().lower()
             if re.fullmatch(r'[0-9a-f]{64}', digest):
                 digest_sources.setdefault(digest, set()).add(source_reference)
             for candidate in (
                 str(asset.local_path or '').strip(),
-                str(asset.meta.get('preview_reference') or '').strip(),
+                str(meta.get('preview_reference') or '').strip(),
             ):
                 if candidate:
                     replacements[candidate] = source_reference
@@ -840,6 +865,7 @@ class GitHubWriterProvider(WriterProviderBase):
                     source_reference
                     for digest, sources in digest_sources.items()
                     if _matches_writer_preview(value, digest)
+                    or _matches_materialized_asset(value, digest)
                     for source_reference in sources
                 }
                 if len(matched_sources) == 1:
