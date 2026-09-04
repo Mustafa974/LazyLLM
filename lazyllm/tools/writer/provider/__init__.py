@@ -6,6 +6,7 @@ from .registry import (
     get_writer_provider,
     match_writer_provider,
     register_writer_provider,
+    resolve_writer_create_target,
 )
 
 
@@ -22,4 +23,5 @@ __all__ = [
     'get_writer_provider',
     'match_writer_provider',
     'register_writer_provider',
+    'resolve_writer_create_target',
 ]

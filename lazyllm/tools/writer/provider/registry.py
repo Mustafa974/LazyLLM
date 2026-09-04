@@ -44,8 +44,29 @@ def match_writer_provider(locator: str, **kwargs: Any) -> WriterProviderBase:
     return candidates[0](**kwargs)
 
 
+def resolve_writer_create_target(locator: str, **kwargs: Any) -> Any:
+    candidates = []
+    for provider_class in _PROVIDERS.values():
+        provider = provider_class(**kwargs)
+        resolver = getattr(provider, '_resolve_create_target', None)
+        if not callable(resolver):
+            continue
+        try:
+            target = resolver(locator)
+        except ValueError:
+            continue
+        candidates.append((provider.provider, target))
+    if not candidates:
+        raise ValueError(f'No Writer provider can create a document under {locator!r}.')
+    if len(candidates) > 1:
+        names = ', '.join(sorted(provider for provider, _ in candidates))
+        raise ValueError(f'Multiple Writer providers match create target {locator!r}: {names}.')
+    return candidates[0][1]
+
+
 __all__ = [
     'get_writer_provider',
     'match_writer_provider',
     'register_writer_provider',
+    'resolve_writer_create_target',
 ]
