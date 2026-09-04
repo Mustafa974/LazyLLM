@@ -1039,7 +1039,7 @@ class GitHubWikiFS(_GitHubFSBase):
                 status_code=404,
             )
         with tempfile.TemporaryDirectory(prefix='lazyllm-github-wiki-') as root:
-            checkout = self._clone(owner, repo, root)
+            checkout = self._clone(owner, repo, root, materialize=False)
             revision = self._git(['rev-parse', 'HEAD'], cwd=str(checkout))
             branch = self._git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=str(checkout))
         browser_url = _wiki_parent_browser_url(owner, repo)
@@ -1075,15 +1075,11 @@ class GitHubWikiFS(_GitHubFSBase):
             )
         page_path = _markdown_filename(title)
         with tempfile.TemporaryDirectory(prefix='lazyllm-github-wiki-') as root:
-            checkout = self._clone(owner, repo, root)
+            checkout = self._clone(owner, repo, root, materialize=False)
             current = self._git(['rev-parse', 'HEAD'], cwd=str(checkout))
-            if current != revision:
-                raise GitHubFSError(
-                    'GITHUB_REVISION_CONFLICT',
-                    'GitHub Wiki changed after the target was selected.',
-                    status_code=409,
-                )
-            if (checkout / page_path).exists():
+            if current == revision and self._git(
+                ['ls-tree', '--name-only', 'HEAD', '--', page_path], cwd=str(checkout),
+            ):
                 raise GitHubFSError(
                     'GITHUB_TARGET_EXISTS',
                     f'GitHub Wiki page already exists: {page_path}.',
@@ -1196,11 +1192,21 @@ class GitHubWikiFS(_GitHubFSBase):
             ) from exc
         return completed.stdout.strip()
 
-    def _clone(self, owner: str, repo: str, root: str) -> Path:
+    def _clone(
+        self,
+        owner: str,
+        repo: str,
+        root: str,
+        *,
+        materialize: bool = True,
+    ) -> Path:
         self._repository(owner, repo)
         checkout = Path(root) / 'wiki'
         remote = f'https://github.com/{owner}/{repo}.wiki.git'
-        self._git(['clone', '--depth', '1', remote, str(checkout)])
+        args = ['clone', '--depth', '1']
+        if not materialize:
+            args.extend(['--filter=blob:none', '--no-checkout'])
+        self._git([*args, remote, str(checkout)])
         return checkout
 
     def _resolved_target(
@@ -1338,7 +1344,7 @@ class GitHubWikiFS(_GitHubFSBase):
         if f'({operation_id})' not in message:
             message = f'{message} ({operation_id})'
         with tempfile.TemporaryDirectory(prefix='lazyllm-github-wiki-') as root:
-            checkout = self._clone(owner, repo, root)
+            checkout = self._clone(owner, repo, root, materialize=False)
             current = self._git(['rev-parse', 'HEAD'], cwd=str(checkout))
             current_message = self._git(['log', '-1', '--format=%B'], cwd=str(checkout))
             if f'({operation_id})' in current_message:
@@ -1350,13 +1356,14 @@ class GitHubWikiFS(_GitHubFSBase):
                         'GitHub Wiki changed after the page was loaded.',
                         status_code=409,
                     )
+                self._git(['read-tree', 'HEAD'], cwd=str(checkout))
                 for relative, data in all_files.items():
                     destination = checkout / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(data)
-                self._git(['add', '--all'], cwd=str(checkout))
-                status = self._git(['status', '--porcelain'], cwd=str(checkout))
-                if status:
+                self._git(['add', '--', *all_files], cwd=str(checkout))
+                staged = self._git(['diff', '--cached', '--name-only'], cwd=str(checkout))
+                if staged:
                     self._git(['commit', '-m', message], cwd=str(checkout))
                     commit_sha = self._git(['rev-parse', 'HEAD'], cwd=str(checkout))
                     branch = self._git(
