@@ -1364,8 +1364,16 @@ class GitHubWikiFS(_GitHubFSBase):
                 self._git(['add', '--', *all_files], cwd=str(checkout))
                 staged = self._git(['diff', '--cached', '--name-only'], cwd=str(checkout))
                 if staged:
-                    self._git(['commit', '-m', message], cwd=str(checkout))
-                    commit_sha = self._git(['rev-parse', 'HEAD'], cwd=str(checkout))
+                    tree_sha = self._git(
+                        ['write-tree', '--missing-ok'], cwd=str(checkout),
+                    )
+                    commit_sha = self._git(
+                        ['commit-tree', tree_sha, '-p', current, '-m', message],
+                        cwd=str(checkout),
+                    )
+                    self._git(
+                        ['update-ref', 'HEAD', commit_sha, current], cwd=str(checkout),
+                    )
                     branch = self._git(
                         ['rev-parse', '--abbrev-ref', 'HEAD'], cwd=str(checkout),
                     )
