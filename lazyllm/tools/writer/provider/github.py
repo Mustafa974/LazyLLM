@@ -6,7 +6,7 @@ import mimetypes
 import os
 import posixpath
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlparse
 
@@ -382,17 +382,29 @@ class GitHubWriterProvider(WriterProviderBase):
         del stage  # Markdown representation does not carry Writer IR stages.
         target_type = self._target_type(target)
         fs = self._fs(target_type)
-        resolved = fs.resolve_target(self._locator(target))
+        locator = self._locator(target)
+        if isinstance(fs, GitHubWikiFS):
+            with fs.read_session(locator) as (resolved, read_bytes):
+                return self._load_resolved_document(target, resolved, read_bytes)
+        resolved = fs.resolve_target(locator)
+        return self._load_resolved_document(target, resolved, fs.read_bytes)
+
+    def _load_resolved_document(
+        self,
+        target: TargetDocument,
+        resolved: Mapping[str, object],
+        read_bytes: Callable[[str], bytes],
+    ) -> dict:
         resolved_target = self._merge_target(target, resolved)
         try:
-            markdown = fs.read_bytes(str(resolved['uri'])).decode('utf-8')
+            markdown = read_bytes(str(resolved['uri'])).decode('utf-8')
         except UnicodeDecodeError as exc:
             raise GitHubFSError(
                 'GITHUB_FORMAT_UNSUPPORTED',
                 'GitHub Writer documents must be UTF-8 Markdown.',
             ) from exc
         resources, warnings = self._collect_referenced_resources(
-            markdown, resolved_target, fs,
+            markdown, resolved_target, read_bytes,
         )
         writer_markdown, image_layouts = _normalize_html_image_layouts(markdown)
         if image_layouts:
@@ -442,7 +454,7 @@ class GitHubWriterProvider(WriterProviderBase):
         self,
         markdown: str,
         target: TargetDocument,
-        fs: GitHubRepoFS | GitHubWikiFS,
+        read_bytes: Callable[[str], bytes],
     ) -> tuple[list[InputResource], list[str]]:
         candidates: list[str] = []
         candidates.extend(
@@ -464,7 +476,7 @@ class GitHubWriterProvider(WriterProviderBase):
             seen.add(uri)
             mime_type = mimetypes.guess_type(unquote(urlparse(uri).path))[0]
             try:
-                payload = fs.read_bytes(uri)
+                payload = read_bytes(uri)
             except Exception as exc:  # noqa: BLE001 - one resource failure becomes a warning.
                 code = getattr(exc, 'code', type(exc).__name__)
                 warnings.append(f'{raw_url}: {code}')
