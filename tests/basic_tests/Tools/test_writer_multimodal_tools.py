@@ -129,12 +129,50 @@ def test_collect_available_media_downloads_feishu_source_images(tmp_path):
         result = tool.collect_available_media(task=task, source_document=source)
 
     library = load_artifact_json(result['artifact_path'], MediaAssetLibrary)
+    resources = load_artifact_json(
+        result['metadata']['artifact_paths']['profile_input_resources'],
+        validate_schema=False,
+    )
     asset = next(iter(library.assets.values()))
     fs.download_media.assert_called_once_with('media-token-1')
     assert asset.caption == '产品原图'
     assert asset.meta['provider_block_id'] == 'block-1'
     assert asset.meta['origin'] == 'source_document'
     assert 'provider_media_token' not in asset.meta
+    assert 'provider_media_token' not in resources[0]['meta']
+    assert Path(asset.local_path).is_file()
+    assert result['metadata']['warnings'] == []
+
+
+def test_collect_available_media_downloads_wechat_source_images(tmp_path):
+    source = WriterDocument(
+        document_id='wechat-draft-1',
+        stage='final',
+        provider_binding={'provider': 'wechat', 'document_id': 'draft-1'},
+        blocks=[WriterBlock(
+            node_id='image-1',
+            type='image',
+            content='公众号原图',
+            stage='final',
+            references=[{
+                'type': 'wechat_image',
+                'url': 'https://mmbiz.qpic.cn/source.png',
+            }],
+            editable=False,
+        )],
+    )
+    tool = WriterMultimodalTools(artifact_store=str(tmp_path / 'media-store'))
+    task = WritingTask(task_id='task-wechat', query='复用公众号原图', task_type='write')
+
+    with patch.object(tool, '_download_external_image', return_value=_PNG_BYTES) as download:
+        result = tool.collect_available_media(task=task, source_document=source)
+
+    library = load_artifact_json(result['artifact_path'], MediaAssetLibrary)
+    asset = next(iter(library.assets.values()))
+    download.assert_called_once_with('https://mmbiz.qpic.cn/source.png')
+    assert asset.caption == '公众号原图'
+    assert asset.meta['provider_block_id'] == 'image-1'
+    assert asset.meta['origin'] == 'source_document'
     assert Path(asset.local_path).is_file()
     assert result['metadata']['warnings'] == []
 
