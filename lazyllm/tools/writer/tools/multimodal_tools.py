@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from lazyllm import config
 from lazyllm.components.formatter import encode_query_with_filepaths
+from lazyllm.tools.fs.supplier.obsidian import OBSIDIAN_MEDIA_SCHEME, ObsidianFS
 from lazyllm.thirdparty import PIL, mistune
 
 from .base import WriterToolBase
@@ -258,6 +259,18 @@ class WriterMultimodalTools(WriterToolBase):
         parsed = urlparse(uri)
         if not uri:
             raise ValueError('image resource URI is required.')
+        if parsed.scheme == OBSIDIAN_MEDIA_SCHEME:
+            source = ObsidianFS().resolve_media_uri(uri)
+            if not 0 < source.stat().st_size <= _MAX_IMAGE_BYTES:
+                raise ValueError('image file must be between 1 byte and 20 MB.')
+            occurrence = hashlib.sha256(uri.encode('utf-8')).hexdigest()[:24]
+            return self._materialize_image_bytes(
+                source.read_bytes(),
+                resource,
+                suffix_hint=source.suffix,
+                media_asset_id=f'asset-obsidian-{occurrence}',
+                storage_key=f'obsidian-{occurrence}',
+            )
         if parsed.scheme in {'http', 'https'}:
             return self._materialize_image_bytes(
                 self._download_external_image(uri),
@@ -265,7 +278,9 @@ class WriterMultimodalTools(WriterToolBase):
                 suffix_hint=Path(parsed.path).suffix,
             )
         if parsed.scheme not in {'', 'file'}:
-            raise ValueError('image inputs must use a local file path or an HTTP(S) URL.')
+            raise ValueError(
+                'image inputs must use a local file path, an HTTP(S) URL, or a supported provider media URI.'
+            )
         source = Path(unquote(parsed.path) if parsed.scheme == 'file' else uri).expanduser().resolve()
         if not source.is_file():
             raise FileNotFoundError(f'image file does not exist: {source}')
@@ -279,6 +294,8 @@ class WriterMultimodalTools(WriterToolBase):
         resource: InputResource,
         *,
         suffix_hint: str = '',
+        media_asset_id: str = '',
+        storage_key: str = '',
     ) -> MediaAsset:
         size = len(data)
         if not 0 < size <= _MAX_IMAGE_BYTES:
@@ -286,7 +303,7 @@ class WriterMultimodalTools(WriterToolBase):
         image_format, width, height = self._inspect_image_bytes(data)
         digest = hashlib.sha256(data).hexdigest()
         suffix = self._image_suffix(suffix_hint, image_format)
-        destination = self._assets_dir() / f'{digest}{suffix}'
+        destination = self._assets_dir() / f'{storage_key or digest}{suffix}'
         if not destination.exists():
             destination.write_bytes(data)
 
@@ -305,7 +322,7 @@ class WriterMultimodalTools(WriterToolBase):
             if resource.meta.get(key) not in (None, '')
         }
         return MediaAsset(
-            media_asset_id=f'asset-{digest}',
+            media_asset_id=media_asset_id or f'asset-{digest}',
             asset_type='generated_image' if source_type == 'image_generation' else 'image',
             source_type=source_type,
             uri=resource.uri,
@@ -439,7 +456,7 @@ class WriterMultimodalTools(WriterToolBase):
         seen: set[str] = set()
         for raw_url, alt, title in references:
             uri = f'https:{raw_url}' if raw_url.startswith('//') else raw_url
-            if urlparse(uri).scheme not in {'http', 'https'}:
+            if urlparse(uri).scheme not in {'http', 'https', OBSIDIAN_MEDIA_SCHEME}:
                 continue
             if uri in seen:
                 continue
