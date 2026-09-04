@@ -167,6 +167,12 @@ class WriterResourceTools(WriterToolBase):
             loaded.get('provider') or resolved_target.adapter or target.adapter or '',
         ).strip().lower()
         block_count = int(loaded.get('block_count') or 0)
+        input_resources = self._unified_models(
+            loaded.get('input_resources'), InputResource,
+        )
+        resource_warnings = [
+            str(item) for item in (loaded.get('resource_warnings') or []) if str(item).strip()
+        ]
         extra = {
             'adapter': provider,
             'document_id': str(resolved_target.doc_id or target.doc_id or ''),
@@ -177,12 +183,17 @@ class WriterResourceTools(WriterToolBase):
             if not isinstance(source, WriterDocument):
                 raise TypeError(f'Provider {provider!r} returned invalid WriterDocument content.')
             result = self._save_artifacts(
-                {'source_document': source, 'target_document': resolved_target},
+                {
+                    'source_document': source,
+                    'target_document': resolved_target,
+                    **({'input_resources': input_resources} if input_resources else {}),
+                },
                 step_name='load_document',
                 primary_key='source_document',
                 context_key=None,
                 summary='Loaded provider document into Writer IR.',
-                counts={'blocks': block_count},
+                counts={'blocks': block_count, 'input_resources': len(input_resources)},
+                warnings=resource_warnings,
                 extra=extra,
             ).model_dump()
         elif representation == 'markdown':
@@ -211,6 +222,23 @@ class WriterResourceTools(WriterToolBase):
             result['metadata']['artifact_paths']['target_document'] = target_path
             result['metadata']['schema_names']['target_document'] = self._artifact_schema_name(
                 resolved_target, 'target_document')
+            if input_resources:
+                resources_path = self._write_single_artifact(
+                    input_resources,
+                    'input_resources.json',
+                    artifact_key='input_resources',
+                    extra_meta={
+                        'step_name': 'load_document',
+                        'artifact_key': 'input_resources',
+                        'primary_key': 'source_document',
+                        'status': 'success',
+                    },
+                )
+                result['metadata']['artifact_paths']['input_resources'] = resources_path
+                result['metadata']['schema_names']['input_resources'] = self._artifact_schema_name(
+                    input_resources, 'input_resources')
+            result['metadata']['warnings'] = resource_warnings
+            result['metadata']['counts']['input_resources'] = len(input_resources)
         else:
             raise ValueError(
                 f'Provider {provider!r} returned unsupported representation {representation!r}.')
@@ -294,6 +322,7 @@ class WriterResourceTools(WriterToolBase):
             str(result.get('locator') or target.uri or ''),
             int(result.get('block_count') or 0),
             list(result.get('warnings') or []),
+            provider_result=result,
         )
 
     def apply_patch_to_document(  # noqa: C901
@@ -368,14 +397,17 @@ class WriterResourceTools(WriterToolBase):
         locator: str,
         block_count: int,
         warnings: Optional[List[str]] = None,
+        provider_result: Optional[Dict[str, Any]] = None,
     ) -> dict:
+        write_result = dict(provider_result or {})
+        write_result.update({
+            'doc_id': document_id,
+            'adapter': adapter,
+            'locator': locator,
+            'block_count': block_count,
+        })
         return self._save_artifacts(
-            {'write_result': {
-                'doc_id': document_id,
-                'adapter': adapter,
-                'locator': locator,
-                'block_count': block_count,
-            }},
+            {'write_result': write_result},
             step_name='write_to_document',
             primary_key='write_result',
             summary='Wrote content to target document.' if document_id else 'No target document was provided.',
