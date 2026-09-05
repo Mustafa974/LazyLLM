@@ -263,13 +263,10 @@ class WriterMultimodalTools(WriterToolBase):
             source = ObsidianFS().resolve_media_uri(uri)
             if not 0 < source.stat().st_size <= _MAX_IMAGE_BYTES:
                 raise ValueError('image file must be between 1 byte and 20 MB.')
-            occurrence = hashlib.sha256(uri.encode('utf-8')).hexdigest()[:24]
             return self._materialize_image_bytes(
                 source.read_bytes(),
                 resource,
                 suffix_hint=source.suffix,
-                media_asset_id=f'asset-obsidian-{occurrence}',
-                storage_key=f'obsidian-{occurrence}',
             )
         if parsed.scheme in {'http', 'https'}:
             return self._materialize_image_bytes(

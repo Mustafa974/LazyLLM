@@ -144,7 +144,7 @@ class TestObsidianHostAbsolutePath:
 class TestObsidianWriterProvider:
     def test_extracts_a_vault_absolute_path_as_a_canonical_uri(self, tmp_path, monkeypatch):
         root = tmp_path / 'mounted-obsidian'
-        note_path = root / 'obs' / 'Folder' / 'Project Note #?.md'
+        note_path = root / 'obs' / 'Folder' / 'Project (draft) [v2] #?.md'
         _vault(note_path.parent.parent)
         note_path.parent.mkdir()
         note_path.write_text('', encoding='utf-8')
@@ -154,11 +154,11 @@ class TestObsidianWriterProvider:
 
         with obsidian_fs.config.temp('obsidian_host_root', '/Users/test/Documents'):
             locator = ObsidianWriterProvider.find_absolute_path_locator(
-                '使用写作工作流，改写 /Users/test/Documents/obs/Folder/Project Note #?.md',
+                '使用写作工作流，改写 /Users/test/Documents/obs/Folder/Project (draft) [v2] #?.md',
             )
 
         assert locator == (
-            f'obsidian://{vault.vault_id}/Folder/Project%20Note%20%23%3F.md'
+            f'obsidian://{vault.vault_id}/Folder/Project%20%28draft%29%20%5Bv2%5D%20%23%3F.md'
         )
 
     def test_ignores_non_vault_absolute_paths_without_initializing_fs(self, monkeypatch):

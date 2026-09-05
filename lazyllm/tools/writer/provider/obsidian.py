@@ -30,8 +30,8 @@ _LOCAL_MARKDOWN_IMAGE_RE = re.compile(
     r'!\[(?P<alt>[^\]]*)\]\((?P<target><[^>\n]+>|[^)\s]+)(?:\s+["\'][^)]*["\'])?\)'
 )
 _ABSOLUTE_MARKDOWN_PATH_RE = re.compile(
-    r"""(?P<path>(?:[A-Za-z]:[\\/]|/)[^\r\n<>"'`()\[\]{},;!，。；！、（）【】《》「」『』]*?\.md)
-        (?=$|[\s<>"'`()\[\]{},;!?，。；！？、（）【】《》「」『』])""",
+    r"""(?P<path>(?:[A-Za-z]:[\\/]|/)[^\r\n<>"'`]*?\.md)
+        (?=$|[\s<>"'`.,;!?，。；！？、）】》」』)\]}])""",
     re.IGNORECASE | re.VERBOSE,
 )
 
