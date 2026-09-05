@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lazyllm.tools.fs.supplier.feishu import FeishuFS
+from lazyllm.tools.fs.supplier.obsidian import ObsidianFS
 from lazyllm.tools.writer.data_models import (
+    InputResource,
     MediaAssetLibrary,
     WriterBlock,
     WriterDocument,
@@ -89,6 +91,28 @@ def test_external_image_download_rejects_non_public_hosts():
         return_value=address_info,
     ), pytest.raises(ValueError, match='non-public image host'):
         tool._validate_remote_url('https://internal.example.com/image.png')
+
+
+def test_obsidian_media_materialization_uses_content_digest(tmp_path):
+    source = tmp_path / 'diagram.png'
+    source.write_bytes(b'first-image-content')
+    resource = InputResource(
+        resource_id='obsidian-image',
+        resource_type='image',
+        uri='lazymind-obsidian-media://vlt_test/diagram.png?ref=img-0001',
+    )
+    tool = WriterMultimodalTools(artifact_store=str(tmp_path / 'media-store'))
+    tool._inspect_image_bytes = MagicMock(return_value=('PNG', 1, 1))
+
+    with patch.object(ObsidianFS, 'resolve_media_uri', return_value=source):
+        first = tool._materialize_input_resource(resource)
+        source.write_bytes(b'second-image-content')
+        second = tool._materialize_input_resource(resource)
+
+    assert first.media_asset_id != second.media_asset_id
+    assert first.local_path != second.local_path
+    assert Path(first.local_path).read_bytes() == b'first-image-content'
+    assert Path(second.local_path).read_bytes() == b'second-image-content'
 
 
 def test_collect_available_media_downloads_feishu_source_images(tmp_path):
