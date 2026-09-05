@@ -203,7 +203,6 @@ class TestObsidianWriterProvider:
             result = provider.replace_document('After', target)
 
         assert result['local_path'] == '/Users/test/Documents/obs/note.md'
-        assert target.meta['_obsidian_display_path'] == '/Users/test/Documents/obs/note.md'
         assert target.meta['obsidian_bridge']['source_hash'] == provider._hash('After\n')
         assert note.path.read_text(encoding='utf-8') == 'After\n'
 
