@@ -16,6 +16,7 @@ from .base import WriterProviderBase
 from ..data_models.multimodal import MediaAssetLibrary
 from ..data_models.task import TargetDocument
 from ..data_models.writer_ir import WriterDocument, WriterStage
+from ..utils import writer_document_to_markdown
 
 
 _FRONTMATTER_RE = re.compile(r'\A---\r?\n.*?\r?\n---(?:\r?\n|\Z)', re.DOTALL)
@@ -110,6 +111,8 @@ class ObsidianWriterProvider(WriterProviderBase):
         *,
         media_assets: MediaAssetLibrary | None = None,
     ) -> dict:
+        if isinstance(content, WriterDocument):
+            content = self._serialize_writer_document(content, media_assets)
         if not isinstance(content, str):
             raise TypeError('Obsidian only accepts Markdown content.')
         fs = self._fs()
@@ -125,7 +128,6 @@ class ObsidianWriterProvider(WriterProviderBase):
             bridge['source_hash'] = self._hash(restored)
             target.meta['obsidian_bridge'] = bridge
         local_path = fs.display_note_path(note)
-        target.meta['_obsidian_display_path'] = local_path
         return {
             'doc_id': self._document_id(note),
             'adapter': self.provider,
@@ -134,6 +136,31 @@ class ObsidianWriterProvider(WriterProviderBase):
             'block_count': len(restored.splitlines()),
             'warnings': warnings,
         }
+
+    @staticmethod
+    def _serialize_writer_document(
+        document: WriterDocument,
+        media_assets: MediaAssetLibrary | None,
+    ) -> str:
+        markdown_document = document.model_copy(deep=True)
+        for block in markdown_document.iter_blocks():
+            if block.type != 'image':
+                continue
+            reference = next(
+                (
+                    item for item in block.references
+                    if item.get('type') == 'media_asset' and item.get('id')
+                ),
+                None,
+            )
+            asset = (
+                media_assets.assets.get(str(reference['id']))
+                if reference is not None and media_assets is not None
+                else None
+            )
+            if asset is not None and asset.local_path:
+                reference['path'] = asset.local_path
+        return writer_document_to_markdown(markdown_document)
 
     @staticmethod
     def _fs() -> ObsidianFS:
