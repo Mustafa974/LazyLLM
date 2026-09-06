@@ -21,6 +21,7 @@ class WriterResourceTools(WriterToolBase):
     __public_apis__ = [
         'profile_resources',
         'load_document',
+        'prepare_loaded_document',
         'document_to_docir',
         'create_document',
         'write_to_document',
@@ -217,6 +218,36 @@ class WriterResourceTools(WriterToolBase):
         result['representation'] = representation
         return result
 
+    def prepare_loaded_document(
+        self,
+        source_document: Any,
+        target_document: Any,
+        media_assets: Any = None,
+    ) -> dict:
+        '''Prepare provider content after the shared media library is available.'''
+        source = self._unified_document(source_document)
+        target = self._unified_model(target_document, TargetDocument)
+        library = self._unified_optional_model(media_assets, MediaAssetLibrary)
+        provider = self._writer_provider(target)
+        prepared = provider.prepare_loaded_document(
+            source,
+            target,
+            media_assets=library,
+        )
+        representation = 'ir' if isinstance(prepared, WriterDocument) else 'markdown'
+        result = self._save_artifacts(
+            {'source_document': prepared, 'target_document': target},
+            step_name='prepare_loaded_document',
+            primary_key='source_document',
+            summary='Prepared loaded provider content for Writer.',
+            extra={
+                'adapter': provider.provider,
+                'representation': representation,
+            },
+        ).model_dump()
+        result['representation'] = representation
+        return result
+
     def create_document(
         self,
         title: str,
@@ -279,7 +310,7 @@ class WriterResourceTools(WriterToolBase):
                 'content not written to any platform',
                 mode,
             )
-            return self._save_write_result('', '', '', 0)
+            return self._save_write_result({})
         media_library = self._unified_optional_model(media_assets, MediaAssetLibrary)
         provider = self._writer_provider(target, source_document)
         provider_key = provider.provider
@@ -289,11 +320,9 @@ class WriterResourceTools(WriterToolBase):
             else provider.append_document(source, target, media_assets=media_library)
         )
         return self._save_write_result(
-            str(result.get('doc_id') or ''),
-            str(result.get('adapter') or provider_key),
-            str(result.get('locator') or target.uri or ''),
-            int(result.get('block_count') or 0),
-            list(result.get('warnings') or []),
+            result,
+            adapter=provider_key,
+            locator=target.uri,
         )
 
     def apply_patch_to_document(  # noqa: C901
@@ -363,24 +392,29 @@ class WriterResourceTools(WriterToolBase):
 
     def _save_write_result(
         self,
-        document_id: str,
-        adapter: str,
-        locator: str,
-        block_count: int,
-        warnings: Optional[List[str]] = None,
+        result: Dict[str, Any],
+        *,
+        adapter: str = '',
+        locator: str = '',
     ) -> dict:
+        write_result = dict(result)
+        document_id = str(write_result.get('doc_id') or '')
+        adapter = str(write_result.get('adapter') or adapter or '')
+        locator = str(write_result.get('locator') or locator or '')
+        block_count = int(write_result.get('block_count') or 0)
+        write_result.update({
+            'doc_id': document_id,
+            'adapter': adapter,
+            'locator': locator,
+            'block_count': block_count,
+        })
         return self._save_artifacts(
-            {'write_result': {
-                'doc_id': document_id,
-                'adapter': adapter,
-                'locator': locator,
-                'block_count': block_count,
-            }},
+            {'write_result': write_result},
             step_name='write_to_document',
             primary_key='write_result',
             summary='Wrote content to target document.' if document_id else 'No target document was provided.',
             counts={'blocks': block_count},
-            warnings=warnings,
+            warnings=list(write_result.get('warnings') or []),
             extra={
                 'adapter': adapter,
                 'document_id': document_id,

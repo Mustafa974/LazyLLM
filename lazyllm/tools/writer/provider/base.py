@@ -22,6 +22,11 @@ class WriterProviderBase(ABC):
         '''Return whether locator belongs to this provider.'''
         raise NotImplementedError
 
+    @classmethod
+    def extract_locator_from_text(cls, text: str) -> str:
+        '''Extract a provider locator from provider-specific input text.'''
+        return ''
+
     @abstractmethod
     def resolve(self, locator: str) -> TargetDocument:
         '''Convert a provider locator into the existing target document model.'''
@@ -36,6 +41,16 @@ class WriterProviderBase(ABC):
     ) -> dict:
         '''Load a provider document and return its existing Writer representation.'''
         raise NotImplementedError
+
+    def prepare_loaded_document(
+        self,
+        source_document: WriterDocument | str,
+        target: TargetDocument,
+        *,
+        media_assets: MediaAssetLibrary | None = None,
+    ) -> WriterDocument | str:
+        '''Prepare loaded content for Writer after source media is collected.'''
+        return source_document
 
     def create_document(self, title: str, parent_uri: str = '') -> TargetDocument:
         '''Create an empty provider document.'''

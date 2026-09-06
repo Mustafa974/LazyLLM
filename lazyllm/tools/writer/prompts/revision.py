@@ -117,8 +117,13 @@ Output semantics:
 - Replacements are returned in application order and preserve unaffected Markdown exactly.
 - Preserve existing <a id="block-..."></a> anchors and internal links exactly.
   Do not rename or drop them unless the instruction explicitly targets that reference.
+- Unless the user explicitly asks to modify the relevant structure, preserve [[...]] and ![[...]]
+  links including their targets, Callout prefixes such as > [!note] and their + or - fold markers,
+  %%...%% comments, ^block-id markers, and complete dataview or dataviewjs fenced blocks including
+  their contents. Callout titles and bodies may be rewritten. Do not convert Wiki Links into ordinary
+  Markdown links or URLs.
 - Image handling:
-  - When an instruction creates an image, put exactly `![<caption>](media-placeholder://<need_id>)`
+  - When an instruction creates a new image, put exactly `![<caption>](media-placeholder://<need_id>)`
     in new_string at the insertion position. Use the need_id from that create instruction's
     visual_instruction; do not reuse a need_id from a different instruction.
     Never use Obsidian/wiki syntax such as `![[...]]`, a local filename/path, a raw URL,
@@ -147,6 +152,11 @@ return the complete replacement paragraph in new_string. Set content_ref to
 document_root=true.
 Preserve unaffected inline formatting.
 Preserve existing internal links and any inline formatting inside the selected block.
+Unless the user explicitly asks to modify the relevant structure, preserve [[...]] and ![[...]]
+links including their targets, Callout prefixes such as > [!note] and their + or - fold markers,
+%%...%% comments, ^block-id markers, and complete dataview or dataviewjs fenced blocks including
+their contents. Callout titles and bodies may be rewritten. Do not convert Wiki Links into ordinary
+Markdown links or URLs.
 Do not return surrounding document content or explanations.
 
 Instruction:

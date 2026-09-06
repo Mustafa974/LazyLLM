@@ -1,4 +1,5 @@
 from copy import deepcopy
+from unittest.mock import MagicMock
 
 from lazyllm.tools.writer.adapter.feishu import FeishuWriterAdapter
 from lazyllm.tools.writer.data_models import (
@@ -6,9 +7,13 @@ from lazyllm.tools.writer.data_models import (
     MediaAssetLibrary,
     PatchHunk,
     WriterBlock,
+    WriterDocument,
     WriterSpan,
 )
+from lazyllm.tools.writer.tools import WriterResourceTools
+from lazyllm.tools.writer.utils import load_artifact_json
 from lazyllm.tools.writer.utils.feishu_docx import prepare_docx_clone_descendants
+from lazyllm.tools.writer.provider.obsidian import ObsidianWriterProvider
 
 
 def _block(block_id, content, *, parent='doc-1', children=None, heading=False):
@@ -161,6 +166,62 @@ def test_move_uses_parent_and_final_index():
         'target_parent_block_id': 'heading-2',
         'target_index': 1,
     }
+
+
+def test_obsidian_write_back_drops_writer_system_anchors():
+    restored = ObsidianWriterProvider()._from_writer_markdown(
+        '# Title\n\n<a id="block-sec-001"></a>\n## Section\n',
+        {},
+        None,
+        MagicMock(),
+        None,
+    )
+
+    assert restored == '# Title\n\n## Section\n'
+
+
+def test_obsidian_ir_write_back_serializes_media_asset_path():
+    document = WriterDocument(
+        document_id='writer-doc',
+        stage='final',
+        title='Report',
+        blocks=[WriterBlock(
+            node_id='image-1',
+            type='image',
+            content='Architecture',
+            references=[{'type': 'media_asset', 'id': 'asset-1'}],
+        )],
+    )
+    media_assets = MediaAssetLibrary(
+        library_id='library-1',
+        assets={'asset-1': MediaAsset(
+            media_asset_id='asset-1',
+            asset_type='image',
+            source_type='input_resource',
+            local_path='/tmp/architecture.png',
+        )},
+    )
+
+    markdown = ObsidianWriterProvider()._serialize_writer_document(document, media_assets)
+
+    assert '](/tmp/architecture.png)' in markdown
+    assert document.blocks[0].references == [{'type': 'media_asset', 'id': 'asset-1'}]
+
+
+def test_write_result_preserves_provider_fields(tmp_path):
+    result = WriterResourceTools(llm=None, artifact_store=str(tmp_path))._save_write_result({
+        'doc_id': 'vault:note.md',
+        'adapter': 'obsidian',
+        'locator': 'obsidian://vault/note.md',
+        'block_count': 3,
+        'local_path': '/Users/example/Documents/vault/note.md',
+        'warnings': ['source changed'],
+    })
+
+    write_result = load_artifact_json(result['artifact_path'], validate_schema=False)
+
+    assert write_result['local_path'] == '/Users/example/Documents/vault/note.md'
+    assert write_result['warnings'] == ['source changed']
 
 
 def test_merge_refreshed_move_restores_writer_identity():
