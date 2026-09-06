@@ -21,6 +21,7 @@ class WriterResourceTools(WriterToolBase):
     __public_apis__ = [
         'profile_resources',
         'load_document',
+        'prepare_loaded_document',
         'document_to_docir',
         'create_document',
         'write_to_document',
@@ -214,6 +215,36 @@ class WriterResourceTools(WriterToolBase):
         else:
             raise ValueError(
                 f'Provider {provider!r} returned unsupported representation {representation!r}.')
+        result['representation'] = representation
+        return result
+
+    def prepare_loaded_document(
+        self,
+        source_document: Any,
+        target_document: Any,
+        media_assets: Any = None,
+    ) -> dict:
+        '''Prepare provider content after the shared media library is available.'''
+        source = self._unified_document(source_document)
+        target = self._unified_model(target_document, TargetDocument)
+        library = self._unified_optional_model(media_assets, MediaAssetLibrary)
+        provider = self._writer_provider(target)
+        prepared = provider.prepare_loaded_document(
+            source,
+            target,
+            media_assets=library,
+        )
+        representation = 'ir' if isinstance(prepared, WriterDocument) else 'markdown'
+        result = self._save_artifacts(
+            {'source_document': prepared, 'target_document': target},
+            step_name='prepare_loaded_document',
+            primary_key='source_document',
+            summary='Prepared loaded provider content for Writer.',
+            extra={
+                'adapter': provider.provider,
+                'representation': representation,
+            },
+        ).model_dump()
         result['representation'] = representation
         return result
 

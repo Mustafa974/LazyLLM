@@ -156,10 +156,16 @@ class TestObsidianWriterProvider:
             locator = ObsidianWriterProvider.find_absolute_path_locator(
                 '使用写作工作流，改写 /Users/test/Documents/obs/Folder/Project (draft) [v2] #?.md',
             )
+            extracted = ObsidianWriterProvider.extract_locator_from_text(
+                '使用写作工作流，改写 /Users/test/Documents/obs/Folder/Project (draft) [v2] #?.md',
+            )
+            resolved = ObsidianWriterProvider().resolve(extracted)
 
         assert locator == (
             f'obsidian://{vault.vault_id}/Folder/Project%20%28draft%29%20%5Bv2%5D%20%23%3F.md'
         )
+        assert extracted == locator
+        assert resolved.uri == locator
 
     def test_ignores_non_vault_absolute_paths_without_initializing_fs(self, monkeypatch):
         monkeypatch.setattr(
@@ -325,7 +331,15 @@ class TestObsidianWriterProvider:
             },
         )
 
-        normalized = provider._normalize_materialized_image_paths(markdown, bridge, media_assets)
+        normalized = provider.prepare_loaded_document(
+            markdown,
+            TargetDocument(
+                uri='obsidian://vlt_test/note.md',
+                adapter='obsidian',
+                meta={'obsidian_bridge': bridge},
+            ),
+            media_assets=media_assets,
+        )
         restored = provider._from_writer_markdown(normalized, bridge, note, fs, media_assets)
 
         assert normalized == f'![diagram]({workspace_image})\n'
