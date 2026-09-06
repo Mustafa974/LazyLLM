@@ -37,6 +37,12 @@ def match_writer_provider(locator: str, **kwargs: Any) -> WriterProviderBase:
         if provider_class.matches(locator)
     ]
     if not candidates:
+        candidates = [
+            provider_class
+            for provider_class in _PROVIDERS.values()
+            if str(provider_class.extract_locator_from_text(locator) or '').strip()
+        ]
+    if not candidates:
         raise ValueError(f'No Writer provider matches locator {locator!r}.')
     if len(candidates) > 1:
         names = ', '.join(sorted(provider.provider for provider in candidates))

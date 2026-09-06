@@ -45,6 +45,10 @@ class ObsidianWriterProvider(WriterProviderBase):
     def matches(cls, locator: str) -> bool:
         return str(locator or '').strip().lower().startswith('obsidian://')
 
+    @classmethod
+    def extract_locator_from_text(cls, text: str) -> str:
+        return cls.find_absolute_path_locator(text)
+
     def resolve(self, locator: str) -> TargetDocument:
         value = str(locator or '').strip()
         if not self.matches(value):
@@ -89,6 +93,21 @@ class ObsidianWriterProvider(WriterProviderBase):
             'provider': self.provider,
             'block_count': len(markdown.splitlines()),
         }
+
+    def prepare_loaded_document(
+        self,
+        source_document: WriterDocument | str,
+        target: TargetDocument,
+        *,
+        media_assets: MediaAssetLibrary | None = None,
+    ) -> WriterDocument | str:
+        if not isinstance(source_document, str) or media_assets is None:
+            return source_document
+        return self._normalize_materialized_image_paths(
+            source_document,
+            dict(target.meta.get('obsidian_bridge') or {}),
+            media_assets,
+        )
 
     def create_document(self, title: str, parent_uri: str = '') -> TargetDocument:
         """Create a note in the configured default Vault.
