@@ -142,47 +142,6 @@ class TestObsidianHostAbsolutePath:
 
 
 class TestObsidianWriterProvider:
-    def test_extracts_a_vault_absolute_path_as_a_canonical_uri(self, tmp_path, monkeypatch):
-        root = tmp_path / 'mounted-obsidian'
-        note_path = root / 'obs' / 'Folder' / 'Project Note #?.md'
-        _vault(note_path.parent.parent)
-        note_path.parent.mkdir()
-        note_path.write_text('', encoding='utf-8')
-        fs = ObsidianFS(token=str(root))
-        vault = fs.discover_vaults()[0]
-        monkeypatch.setattr(ObsidianWriterProvider, '_fs', staticmethod(lambda: fs))
-
-        with obsidian_fs.config.temp('obsidian_host_root', '/Users/test/Documents'):
-            locator = ObsidianWriterProvider.find_absolute_path_locator(
-                '使用写作工作流，改写 /Users/test/Documents/obs/Folder/Project Note #?.md',
-            )
-
-        assert locator == (
-            f'obsidian://{vault.vault_id}/Folder/Project%20Note%20%23%3F.md'
-        )
-
-    def test_ignores_non_vault_absolute_paths_without_initializing_fs(self, monkeypatch):
-        monkeypatch.setattr(
-            ObsidianWriterProvider,
-            '_fs',
-            staticmethod(lambda: (_ for _ in ()).throw(AssertionError('unexpected fs access'))),
-        )
-
-        assert ObsidianWriterProvider.find_absolute_path_locator('写一篇普通文章。') == ''
-
-    def test_ignores_an_absolute_path_outside_the_vault(self, tmp_path, monkeypatch):
-        root = tmp_path / 'mounted-obsidian'
-        _vault(root / 'obs')
-        fs = ObsidianFS(token=str(root))
-        monkeypatch.setattr(ObsidianWriterProvider, '_fs', staticmethod(lambda: fs))
-
-        with obsidian_fs.config.temp('obsidian_host_root', '/Users/test/Documents'):
-            locator = ObsidianWriterProvider.find_absolute_path_locator(
-                '改写 /Users/test/Desktop/ordinary.md',
-            )
-
-        assert locator == ''
-
     def test_write_result_includes_the_host_local_path(self, tmp_path, monkeypatch):
         root = tmp_path / 'scan-root'
         vault_root = root / 'obs'

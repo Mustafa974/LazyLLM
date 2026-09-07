@@ -29,13 +29,6 @@ _MARKDOWN_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)\s]+)(?:\s+["\'][^)]*["\'])
 _LOCAL_MARKDOWN_IMAGE_RE = re.compile(
     r'!\[(?P<alt>[^\]]*)\]\((?P<target><[^>\n]+>|[^)\s]+)(?:\s+["\'][^)]*["\'])?\)'
 )
-_ABSOLUTE_MARKDOWN_PATH_RE = re.compile(
-    r"""(?P<path>(?:[A-Za-z]:[\\/]|/)[^\r\n<>"'`()\[\]{},;!，。；！、（）【】《》「」『』]*?\.md)
-        (?=$|[\s<>"'`()\[\]{},;!?，。；！？、（）【】《》「」『』])""",
-    re.IGNORECASE | re.VERBOSE,
-)
-
-
 class ObsidianWriterProvider(WriterProviderBase):
     """Bridge an Obsidian Markdown note through Writer's Markdown path."""
 
@@ -50,22 +43,6 @@ class ObsidianWriterProvider(WriterProviderBase):
         if not self.matches(value):
             raise ValueError('Invalid Obsidian document locator.')
         return TargetDocument(uri=value, adapter=self.provider)
-
-    @classmethod
-    def find_absolute_path_locator(cls, user_input: str) -> str:
-        """Return a canonical URI only for an absolute note path inside a Vault."""
-        locator = ''
-        fs: ObsidianFS | None = None
-        for match in _ABSOLUTE_MARKDOWN_PATH_RE.finditer(str(user_input or '')):
-            fs = fs or cls._fs()
-            note = fs.resolve_host_absolute_path(match.group('path'))
-            if note is None:
-                continue
-            candidate = cls._canonical_uri(note)
-            if locator and candidate != locator:
-                raise ValueError('Exactly one Obsidian document source is required.')
-            locator = candidate
-        return locator
 
     def load_document(
         self,
