@@ -323,6 +323,8 @@ class WriterResourceTools(WriterToolBase):
             int(result.get('block_count') or 0),
             list(result.get('warnings') or []),
             provider_result=result,
+            persisted_document=result.get('persisted_document'),
+            representation=str(result.get('representation') or ''),
         )
 
     def apply_patch_to_document(  # noqa: C901
@@ -398,6 +400,8 @@ class WriterResourceTools(WriterToolBase):
         block_count: int,
         warnings: Optional[List[str]] = None,
         provider_result: Optional[Dict[str, Any]] = None,
+        persisted_document: Any = None,
+        representation: str = '',
     ) -> dict:
         write_result = dict(provider_result or {})
         write_result.update({
@@ -406,8 +410,11 @@ class WriterResourceTools(WriterToolBase):
             'locator': locator,
             'block_count': block_count,
         })
+        artifacts: Dict[str, Any] = {'write_result': write_result}
+        if persisted_document is not None:
+            artifacts['persisted_document'] = persisted_document
         return self._save_artifacts(
-            {'write_result': write_result},
+            artifacts,
             step_name='write_to_document',
             primary_key='write_result',
             summary='Wrote content to target document.' if document_id else 'No target document was provided.',
@@ -416,5 +423,6 @@ class WriterResourceTools(WriterToolBase):
             extra={
                 'adapter': adapter,
                 'document_id': document_id,
+                'representation': representation or None,
             },
         ).model_dump()

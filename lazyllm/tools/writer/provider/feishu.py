@@ -12,7 +12,7 @@ from ..adapter.base import NativePatchOperation, WriterAdapterBase
 from ..adapter.feishu import FeishuWriterAdapter, feishu_block_url
 from ..data_models.multimodal import MediaAssetLibrary
 from ..data_models.revision import PatchHunk, PatchResult, PatchSet
-from ..data_models.task import TargetDocument
+from ..data_models.task import InputResource, TargetDocument
 from ..data_models.writer_ir import WriterBlock, WriterDocument, WriterStage
 from ..numbering import (
     build_numbering_view_from_ir,
@@ -124,6 +124,71 @@ class FeishuWriterProvider(WriterProviderBase):
                 'space_id': effective_space_id,
             },
         )
+
+    def document_image_resources(
+        self,
+        document: WriterDocument,
+    ) -> tuple[list[InputResource], list[str]]:
+        locator = str(
+            document.provider_binding.get('uri')
+            or ((document.metadata.get('source') or {}).get('uri') if isinstance(
+                document.metadata.get('source'), dict) else '')
+            or f'feishu:/~docx/{document.provider_binding.get("document_id") or ""}'
+        ).strip()
+        resources: list[InputResource] = []
+        warnings: list[str] = []
+        for block in (item for item in document.iter_blocks() if item.type == 'image'):
+            raw = block.provider_payload.get('raw_block') or {}
+            image = raw.get('image') if isinstance(raw, dict) else None
+            token = str((image or {}).get('token') or '').strip()
+            block_id = str(block.provider_binding.get('block_id') or block.node_id)
+            if not token:
+                warnings.append(f'Feishu image block {block_id!r} has no media token.')
+                continue
+            resources.append(InputResource(
+                resource_id=f'feishu-image-{block_id}',
+                resource_type='image',
+                uri=f'{locator}#image={block_id}',
+                title=block.content or f'Feishu image {block_id}',
+                summary=block.content or None,
+                meta={
+                    'provider': self.provider,
+                    'provider_block_id': block_id,
+                    'source_type': 'input_resource',
+                    'origin': 'source_document',
+                    'caption': block.content or None,
+                },
+            ))
+        return resources, warnings
+
+    def download_document_image(
+        self,
+        document: WriterDocument,
+        resource: InputResource,
+    ) -> bytes | None:
+        block_id = str(resource.meta.get('provider_block_id') or '').strip()
+        block = next((
+            item for item in document.iter_blocks()
+            if str(item.provider_binding.get('block_id') or item.node_id) == block_id
+        ), None)
+        raw = block.provider_payload.get('raw_block') if block else None
+        image = raw.get('image') if isinstance(raw, dict) else None
+        token = str((image or {}).get('token') or '').strip()
+        if not token:
+            raise ValueError(f'Feishu image block {block_id!r} has no media token.')
+        locator = str(
+            document.provider_binding.get('uri')
+            or ((document.metadata.get('source') or {}).get('uri') if isinstance(
+                document.metadata.get('source'), dict) else '')
+            or f'feishu:/~docx/{document.provider_binding.get("document_id") or ""}'
+        ).strip()
+        import lazyllm.tools.fs.client as _fs_client
+        protocol, space_id, real_path = _fs_client.FS._parse(locator)
+        fs = _fs_client.FS._get_or_create_fs(protocol, space_id, real_path)
+        download_media = getattr(fs, 'download_media', None)
+        if not callable(download_media):
+            raise TypeError(f'{type(fs).__name__} does not support Feishu media downloads.')
+        return download_media(token)
 
     def replace_document(
         self,
