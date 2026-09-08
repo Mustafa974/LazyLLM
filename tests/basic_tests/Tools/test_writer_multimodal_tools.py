@@ -91,6 +91,38 @@ def test_collect_available_media_materializes_provider_image_with_source_metadat
     assert asset.meta['source_reference'] == 'assets/diagram.svg'
 
 
+def test_collect_available_media_materializes_obsidian_file_resource(tmp_path):
+    image = tmp_path / 'diagram.png'
+    image.write_bytes(_PNG_BYTES)
+    tool = WriterMultimodalTools(artifact_store=str(tmp_path / 'media-store'))
+    task = WritingTask(
+        task_id='task-obsidian-file',
+        query='复用 Obsidian 原图',
+        task_type='write',
+        inputs=[InputResource(
+            resource_id='obsidian-image-0000',
+            resource_type='image',
+            uri=image.as_uri(),
+            title=image.name,
+            meta={
+                'provider': 'obsidian',
+                'origin': 'markdown',
+                'source_reference': 'diagram.png',
+            },
+        )],
+    )
+
+    result = tool.collect_available_media(task=task)
+
+    library = load_artifact_json(result['artifact_path'], MediaAssetLibrary)
+    asset = next(iter(library.assets.values()))
+    assert asset.uri == image.as_uri()
+    assert asset.meta['provider'] == 'obsidian'
+    assert asset.meta['source_reference'] == 'diagram.png'
+    assert Path(asset.local_path).is_file()
+    assert result['metadata']['warnings'] == []
+
+
 def test_external_image_download_streams_valid_image_bytes():
     response = MagicMock(
         status_code=200,

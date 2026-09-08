@@ -103,11 +103,11 @@ Requirements:
 - When section_instruction.meta.rewrite=true, treat meta.source_content as the authoritative
   source material for this section and meta.source_format as formatting guidance. Rewrite it
   according to the instruction without exposing source metadata in the result.
-- Unless the user explicitly asks to modify the relevant structure, preserve these Markdown
-  extensions exactly: [[...]] and ![[...]] links including their targets; Callout prefixes
-  such as > [!note] and their + or - fold markers; %%...%% comments; ^block-id markers; and
-  complete dataview or dataviewjs fenced blocks including their contents. Callout titles and
-  bodies may be rewritten. Do not convert Wiki Links into ordinary Markdown links or URLs.
+- Unless the user explicitly asks to modify the relevant structure, preserve non-standard Markdown
+  extensions and structural markers exactly: double-bracket links and embeds including their targets;
+  Callout prefixes such as > [!note] and their + or - fold markers; inline comments; block-ID markers;
+  and complete query fenced blocks including their contents. Callout titles and bodies may be rewritten.
+  Do not convert double-bracket links into ordinary Markdown links or URLs.
 - Use references when relevant, but do not copy reference metadata into the document.
 - Do not invent facts that conflict with the writing context.
 - If previous Markdown is provided, maintain continuity and avoid repetition.
@@ -160,11 +160,11 @@ CONDENSE_DRAFT_SECTION_MARKDOWN_PROMPT = '''Condense this Markdown section body 
 
 Preserve every heading unchanged, along with the main plot or argument, ending, point of view,
 tone, and essential Markdown.
-Unless the user explicitly asks to modify the relevant structure, preserve [[...]] and ![[...]]
-links including their targets, Callout prefixes such as > [!note] and their + or - fold markers,
-%%...%% comments, ^block-id markers, and complete dataview or dataviewjs fenced blocks including
-their contents. Callout titles and bodies may be rewritten. Do not convert Wiki Links into ordinary
-Markdown links or URLs.
+Unless the user explicitly asks to modify the relevant structure, preserve non-standard Markdown
+extensions and structural markers exactly: double-bracket links and embeds including their targets;
+Callout prefixes such as > [!note] and their + or - fold markers; inline comments; block-ID markers;
+and complete query fenced blocks including their contents. Callout titles and bodies may be rewritten.
+Do not convert double-bracket links into ordinary Markdown links or URLs.
 Do not add new content, a section heading, reasoning, or planning notes.
 Return only the condensed section body.
 
@@ -191,11 +191,11 @@ Requirements:
   asset paths, URLs, HTML anchors, or prose links to the image. When short_visuals is empty, output no images.
 - Treat expected_blocks as an internal order and coverage guide. Do not copy its entries as headings,
   labels, a checklist, or separately generated fragments.
-- Unless the user explicitly asks to modify the relevant structure, preserve [[...]] and ![[...]]
-  links including their targets, Callout prefixes such as > [!note] and their + or - fold markers,
-  %%...%% comments, ^block-id markers, and complete dataview or dataviewjs fenced blocks including
-  their contents. Callout titles and bodies may be rewritten. Do not convert Wiki Links into ordinary
-  Markdown links or URLs.
+- Unless the user explicitly asks to modify the relevant structure, preserve non-standard Markdown
+  extensions and structural markers exactly: double-bracket links and embeds including their targets;
+  Callout prefixes such as > [!note] and their + or - fold markers; inline comments; block-ID markers;
+  and complete query fenced blocks including their contents. Callout titles and bodies may be rewritten.
+  Do not convert double-bracket links into ordinary Markdown links or URLs.
 - Express core_viewpoint clearly while covering required_points within the available length.
 - Respect fact_constraints and style_constraints.
 - Use relevant references as source guidance, but do not copy reference metadata into the article.

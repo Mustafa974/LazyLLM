@@ -11,7 +11,7 @@ import re
 import shutil
 import time
 from dataclasses import dataclass
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 from uuid import uuid4
@@ -26,9 +26,8 @@ config.add(
 )
 
 
-OBSIDIAN_MEDIA_SCHEME = 'lazymind-obsidian-media'
 OBSIDIAN_IMAGE_SUFFIXES = frozenset({
-    '.bmp', '.gif', '.jpeg', '.jpg', '.png', '.tif', '.tiff', '.webp',
+    '.bmp', '.gif', '.jpeg', '.jpg', '.png', '.svg', '.tif', '.tiff', '.webp',
 })
 
 
@@ -132,52 +131,6 @@ class ObsidianFS(LazyLLMFSBase):
             raise ValueError('Obsidian note locator does not identify a configured note.')
         return self._note_from_relative(vault, relative_path)
 
-    def resolve_host_absolute_path(self, path: str) -> ObsidianNote | None:
-        """Resolve a host path only when it identifies a note in a discovered Vault."""
-        runtime_path = self._runtime_path_for_host_absolute(path)
-        if runtime_path is None:
-            return None
-        resolved = runtime_path.resolve()
-        for vault in self.discover_vaults():
-            try:
-                relative_path = resolved.relative_to(vault.root.resolve()).as_posix()
-            except ValueError:
-                continue
-            return self._note_from_relative(vault, relative_path)
-        return None
-
-    def _runtime_path_for_host_absolute(self, path: str) -> Path | None:
-        value = str(path or '').strip()
-        is_windows_path = bool(re.match(r'^[A-Za-z]:[\\/]', value))
-        path_object = PureWindowsPath(value) if is_windows_path else Path(value).expanduser()
-        if path_object.suffix.lower() != '.md':
-            return None
-
-        host_root = str(config['obsidian_host_root'] or '').strip()
-        if not host_root:
-            if is_windows_path and os.name != 'nt':
-                return None
-            return Path(value).expanduser() if Path(value).is_absolute() else None
-
-        host_is_windows = bool(re.match(r'^[A-Za-z]:[\\/]', host_root))
-        if host_is_windows != is_windows_path:
-            return None
-        if host_is_windows:
-            try:
-                relative_path = PureWindowsPath(value).relative_to(PureWindowsPath(host_root))
-            except ValueError:
-                return None
-            return Path(self._vault_root, *relative_path.parts)
-
-        host_path = Path(host_root).expanduser()
-        if not path_object.is_absolute() or not host_path.is_absolute():
-            return None
-        try:
-            relative_path = path_object.relative_to(host_path)
-        except ValueError:
-            return None
-        return Path(self._vault_root) / relative_path
-
     def _note_from_relative(self, vault: ObsidianVault, relative_path: str) -> ObsidianNote:
         candidate = Path(relative_path)
         if candidate.suffix.lower() != '.md':
@@ -230,33 +183,6 @@ class ObsidianFS(LazyLLMFSBase):
         resolved = self._vault_image_path(note.vault, candidate)
         if resolved is None:
             raise FileNotFoundError('Obsidian image reference was not found.')
-        return resolved
-
-    def media_uri(self, note: ObsidianNote, source: str | Path, reference_id: str) -> str:
-        source_path = Path(source).resolve()
-        try:
-            relative = source_path.relative_to(note.vault.root).as_posix()
-        except ValueError as exc:
-            raise ValueError('Obsidian image source is outside the Vault.') from exc
-        return (
-            f'{OBSIDIAN_MEDIA_SCHEME}://{note.vault.vault_id}/'
-            f'{quote(relative, safe="/")}?ref={quote(str(reference_id))}'
-        )
-
-    def resolve_media_uri(self, uri: str) -> Path:
-        """Resolve an internal Writer image URI back to a Vault image file."""
-        parsed = urlsplit(str(uri or '').strip())
-        if parsed.scheme.lower() != OBSIDIAN_MEDIA_SCHEME:
-            raise ValueError('Invalid Obsidian media URI.')
-        vault = next((item for item in self.discover_vaults() if item.vault_id == parsed.netloc), None)
-        relative = unquote(parsed.path.lstrip('/'))
-        if vault is None or not relative:
-            raise FileNotFoundError('Obsidian media URI does not identify a configured image.')
-        if Path(relative).suffix.lower() not in OBSIDIAN_IMAGE_SUFFIXES:
-            raise ValueError('Obsidian image format is not supported by Writer.')
-        resolved = self._vault_image_path(vault, vault.root / relative)
-        if resolved is None:
-            raise FileNotFoundError('Obsidian image was not found.')
         return resolved
 
     def display_note_path(self, note: ObsidianNote) -> str:

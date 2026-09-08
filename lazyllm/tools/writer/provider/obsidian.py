@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import mimetypes
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List
@@ -14,7 +16,7 @@ from lazyllm.tools.fs.supplier.obsidian import (
 
 from .base import WriterProviderBase
 from ..data_models.multimodal import MediaAssetLibrary
-from ..data_models.task import TargetDocument
+from ..data_models.task import InputResource, TargetDocument
 from ..data_models.writer_ir import WriterDocument, WriterStage
 from ..utils import writer_document_to_markdown
 
@@ -29,6 +31,8 @@ _MARKDOWN_IMAGE_RE = re.compile(r'!\[([^\]]*)\]\(([^)\s]+)(?:\s+["\'][^)]*["\'])
 _LOCAL_MARKDOWN_IMAGE_RE = re.compile(
     r'!\[(?P<alt>[^\]]*)\]\((?P<target><[^>\n]+>|[^)\s]+)(?:\s+["\'][^)]*["\'])?\)'
 )
+
+
 class ObsidianWriterProvider(WriterProviderBase):
     """Bridge an Obsidian Markdown note through Writer's Markdown path."""
 
@@ -59,12 +63,15 @@ class ObsidianWriterProvider(WriterProviderBase):
         resolved.adapter = self.provider
         resolved.title = resolved.title or Path(note.relative_path).stem
         resolved.meta['obsidian_bridge'] = bridge
+        resources = self._image_resources(bridge, resolved)
         return {
             'representation': 'markdown',
             'source_document': markdown,
             'target_document': resolved,
             'provider': self.provider,
             'block_count': len(markdown.splitlines()),
+            'input_resources': resources,
+            'resource_warnings': list(bridge.get('warnings') or []),
         }
 
     def create_document(self, title: str, parent_uri: str = '') -> TargetDocument:
@@ -155,6 +162,43 @@ class ObsidianWriterProvider(WriterProviderBase):
     def _canonical_uri(note: ObsidianNote) -> str:
         return f'obsidian://{note.vault.vault_id}/{quote(note.relative_path, safe="/")}'
 
+    @staticmethod
+    def _writer_image_reference(note: ObsidianNote, source: Path) -> str:
+        relative = Path(os.path.relpath(source, note.path.parent)).as_posix()
+        return quote(relative, safe='/._-')
+
+    @staticmethod
+    def _image_resources(
+        bridge: Dict[str, Any],
+        target: TargetDocument,
+    ) -> List[InputResource]:
+        resources: List[InputResource] = []
+        for index, (reference, item) in enumerate(
+            dict(bridge.get('images') or {}).items(),
+        ):
+            if not isinstance(item, dict):
+                continue
+            resource_uri = str(item.get('resource_uri') or '').strip()
+            if not resource_uri:
+                continue
+            path = Path(unquote(urlparse(resource_uri).path))
+            resources.append(InputResource(
+                resource_id=f'obsidian-image-{index:04d}',
+                resource_type='image',
+                uri=resource_uri,
+                mime_type=mimetypes.guess_type(path.name)[0],
+                title=path.name or None,
+                summary=None,
+                meta={
+                    'provider': 'obsidian',
+                    'origin': 'markdown',
+                    'role': 'background',
+                    'referenced_from': target.uri,
+                    'source_reference': str(reference),
+                },
+            ))
+        return resources
+
     def _to_writer_markdown(
         self,
         content: str,
@@ -196,10 +240,12 @@ class ObsidianWriterProvider(WriterProviderBase):
                 )
             except (FileNotFoundError, ValueError) as exc:
                 return unsupported_image(raw, f'Obsidian image was kept without import: {exc}')
-            reference_id = f'img-{len(images) + 1:04x}'
-            uri = fs.media_uri(note, source, reference_id)
-            images[uri] = {'raw': raw}
-            return f'![{alt or source.stem}]({uri})'
+            writer_reference = self._writer_image_reference(note, source)
+            images[writer_reference] = {
+                'raw': raw,
+                'resource_uri': source.as_uri(),
+            }
+            return f'![{alt or source.stem}]({writer_reference})'
 
         def obsidian_image(match: re.Match[str]) -> str:
             raw = match.group(0)
@@ -218,6 +264,8 @@ class ObsidianWriterProvider(WriterProviderBase):
             target = raw_target
             if target.startswith('<') and target.endswith('>'):
                 target = target[1:-1].strip()
+            if target in images:
+                return raw
             parsed = urlparse(target)
             if parsed.scheme.lower() in {'http', 'https'} or target.startswith('//'):
                 media_uri = f'https:{target}' if target.startswith('//') else target
@@ -251,37 +299,6 @@ class ObsidianWriterProvider(WriterProviderBase):
         content = _WRITER_SYSTEM_ANCHOR_LINE_RE.sub('', content)
         frontmatter = str(bridge.get('frontmatter') or '')
         return frontmatter + content.strip() + '\n'
-
-    @staticmethod
-    def _normalize_materialized_image_paths(
-        content: str,
-        bridge: Dict[str, Any],
-        media_assets: MediaAssetLibrary,
-    ) -> str:
-        """Replace bridge-only image URIs with existing Writer media paths."""
-        images = {
-            str(uri): dict(item)
-            for uri, item in dict(bridge.get('images') or {}).items()
-            if isinstance(item, dict)
-        }
-        paths = {
-            str(asset.uri or ''): str(asset.local_path or '')
-            for asset in media_assets.assets.values()
-            if str(asset.uri or '').strip() and str(asset.local_path or '').strip()
-        }
-        for uri, item in images.items():
-            local_path = paths.get(uri)
-            if local_path:
-                content = content.replace(uri, local_path)
-                continue
-            raw = str(item.get('raw') or '')
-            if raw:
-                content = re.sub(
-                    r'!\[[^\]]*\]\(' + re.escape(uri) + r'\)',
-                    lambda _match, raw=raw: raw,
-                    content,
-                )
-        return content
 
     def _restore_images(
         self,
@@ -339,12 +356,13 @@ class ObsidianWriterProvider(WriterProviderBase):
             if raw:
                 return raw
         for asset in assets:
-            source_uri = str(asset.uri or '')
-            item = images.get(source_uri)
-            if not item:
-                continue
             local_path = str(asset.local_path or '')
-            if uri != local_path:
+            if uri != local_path and uri != str(asset.uri or ''):
+                continue
+            metadata = getattr(asset, 'meta', {}) or {}
+            source_reference = str(metadata.get('source_reference') or '')
+            item = images.get(source_reference)
+            if not item:
                 continue
             raw = str(item.get('raw') or '')
             if raw:
@@ -353,10 +371,6 @@ class ObsidianWriterProvider(WriterProviderBase):
 
     @staticmethod
     def _asset_path(uri: str, assets: list[Any]) -> Path | None:
-        parsed = urlparse(uri)
-        candidate = Path(unquote(parsed.path) if parsed.scheme == 'file' else uri)
-        if candidate.is_file():
-            return candidate
         for asset in assets:
             values = {str(asset.uri or ''), str(asset.local_path or '')}
             if uri not in values:

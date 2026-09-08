@@ -1,7 +1,5 @@
 from unittest.mock import MagicMock
 
-import pytest
-
 from lazyllm.tools.fs.supplier import obsidian as obsidian_fs
 from lazyllm.tools.fs.supplier.obsidian import ObsidianFS, ObsidianNote, ObsidianVault
 from lazyllm.tools.writer.data_models.multimodal import MediaAsset, MediaAssetLibrary
@@ -85,60 +83,6 @@ class TestObsidianDisplayPath:
 
         with obsidian_fs.config.temp('obsidian_host_root', '/Users/test/Documents'):
             assert fs.display_note_path(note) == '/Users/test/Documents/obs/note.md'
-
-
-class TestObsidianHostAbsolutePath:
-    def test_resolves_a_posix_host_path_inside_a_vault(self, tmp_path):
-        root = tmp_path / 'mounted-obsidian'
-        note_path = root / 'obs' / 'Folder' / 'Project Note #?.md'
-        _vault(note_path.parent.parent)
-        note_path.parent.mkdir()
-        note_path.write_text('', encoding='utf-8')
-        fs = ObsidianFS(token=str(root))
-
-        with obsidian_fs.config.temp('obsidian_host_root', '/Users/test/Documents'):
-            note = fs.resolve_host_absolute_path(
-                '/Users/test/Documents/obs/Folder/Project Note #?.md',
-            )
-
-        assert note is not None
-        assert note.path == note_path
-        assert note.relative_path == 'Folder/Project Note #?.md'
-
-    def test_resolves_a_windows_host_path_inside_a_vault(self, tmp_path):
-        root = tmp_path / 'mounted-obsidian'
-        note_path = root / 'obs' / 'Folder' / 'Project Note.md'
-        _vault(note_path.parent.parent)
-        note_path.parent.mkdir()
-        note_path.write_text('', encoding='utf-8')
-        fs = ObsidianFS(token=str(root))
-
-        with obsidian_fs.config.temp('obsidian_host_root', r'C:\Users\test\Documents'):
-            note = fs.resolve_host_absolute_path(
-                r'C:\Users\test\Documents\obs\Folder\Project Note.md',
-            )
-
-        assert note is not None
-        assert note.path == note_path
-
-    def test_returns_none_for_a_host_path_outside_a_vault(self, tmp_path):
-        root = tmp_path / 'mounted-obsidian'
-        vault_root = root / 'obs'
-        _vault(vault_root)
-        fs = ObsidianFS(token=str(root))
-
-        with obsidian_fs.config.temp('obsidian_host_root', '/Users/test/Documents'):
-            assert fs.resolve_host_absolute_path('/Users/test/Desktop/note.md') is None
-
-    def test_reports_a_missing_note_inside_a_vault(self, tmp_path):
-        root = tmp_path / 'mounted-obsidian'
-        vault_root = root / 'obs'
-        _vault(vault_root)
-        fs = ObsidianFS(token=str(root))
-
-        with obsidian_fs.config.temp('obsidian_host_root', '/Users/test/Documents'):
-            with pytest.raises(FileNotFoundError, match='Obsidian note was not found'):
-                fs.resolve_host_absolute_path('/Users/test/Documents/obs/missing.md')
 
 
 class TestObsidianWriterProvider:
@@ -243,33 +187,39 @@ class TestObsidianWriterProvider:
 
         assert restored == 'Title\n> Body\n'
 
-    def test_bridged_vault_image_round_trips_without_becoming_a_token(self, tmp_path):
+    def test_load_returns_local_vault_images_as_file_resources(self, tmp_path, monkeypatch):
         provider = ObsidianWriterProvider()
-        note = _note(tmp_path)
-        image = tmp_path / 'diagram.png'
+        root = tmp_path / 'scan-root'
+        vault_root = root / 'obs'
+        _vault(vault_root)
+        note_path = vault_root / 'note.md'
+        image = vault_root / 'diagram.png'
+        note_path.write_text('![[diagram.png]]\n', encoding='utf-8')
         image.write_bytes(b'not-inspected-by-this-bridge')
-        fs = MagicMock()
-        fs.resolve_image_reference.return_value = image
-        fs.media_uri.return_value = 'lazymind-obsidian-media://vlt_test/diagram.png?ref=img-0001'
+        fs = ObsidianFS(token=str(root))
+        monkeypatch.setattr(ObsidianWriterProvider, '_fs', staticmethod(lambda: fs))
+        target = TargetDocument(
+            uri='obsidian://' + fs.discover_vaults()[0].vault_id + '/note.md',
+            adapter='obsidian',
+        )
 
-        markdown, bridge = provider._to_writer_markdown('![[diagram.png]]\n', note, fs)
-        restored = provider._from_writer_markdown(markdown, bridge, note, fs, None)
+        loaded = provider.load_document(target)
 
-        assert markdown == '![diagram](lazymind-obsidian-media://vlt_test/diagram.png?ref=img-0001)\n'
-        assert 'tokens' not in bridge
-        assert restored == '![[diagram.png]]\n'
+        assert loaded['source_document'] == '![diagram](diagram.png)\n'
+        assert len(loaded['input_resources']) == 1
+        assert loaded['input_resources'][0].uri == image.as_uri()
+        assert loaded['input_resources'][0].meta['source_reference'] == 'diagram.png'
+        assert loaded['resource_warnings'] == []
 
-    def test_bridged_vault_image_uses_media_path_and_restores_raw_embed(self, tmp_path):
+    def test_bridged_vault_image_restores_raw_embed_after_media_materialization(self, tmp_path):
         provider = ObsidianWriterProvider()
         note = _note(tmp_path)
         image = tmp_path / 'diagram.png'
         image.write_bytes(b'not-inspected-by-this-bridge')
         workspace_image = tmp_path / 'writer-media.png'
         workspace_image.write_bytes(b'writer-media')
-        uri = 'lazymind-obsidian-media://vlt_test/diagram.png?ref=img-0001'
         fs = MagicMock()
         fs.resolve_image_reference.return_value = image
-        fs.media_uri.return_value = uri
         markdown, bridge = provider._to_writer_markdown('![[diagram.png]]\n', note, fs)
         media_assets = MediaAssetLibrary(
             library_id='media-library-test',
@@ -278,17 +228,17 @@ class TestObsidianWriterProvider:
                     media_asset_id='asset-obsidian-test',
                     asset_type='image',
                     source_type='input_resource',
-                    uri=uri,
+                    uri=image.as_uri(),
                     local_path=str(workspace_image),
+                    meta={'source_reference': 'diagram.png'},
                 ),
             },
         )
 
-        normalized = provider._normalize_materialized_image_paths(markdown, bridge, media_assets)
-        restored = provider._from_writer_markdown(normalized, bridge, note, fs, media_assets)
+        restored = provider._from_writer_markdown(
+            f'![diagram]({workspace_image})\n', bridge, note, fs, media_assets,
+        )
 
-        assert normalized == f'![diagram]({workspace_image})\n'
-        assert 'lazymind-obsidian-media://' not in normalized
         assert restored == '![[diagram.png]]\n'
 
     def test_unmaterialized_vault_image_restores_raw_embed_before_presentation(self, tmp_path):
@@ -298,17 +248,13 @@ class TestObsidianWriterProvider:
         image.write_bytes(b'not-inspected-by-this-bridge')
         fs = MagicMock()
         fs.resolve_image_reference.return_value = image
-        fs.media_uri.return_value = 'lazymind-obsidian-media://vlt_test/diagram.png?ref=img-0001'
         markdown, bridge = provider._to_writer_markdown('![[diagram.png]]\n', note, fs)
 
-        normalized = provider._normalize_materialized_image_paths(
-            markdown,
-            bridge,
-            MediaAssetLibrary(library_id='media-library-test'),
+        restored = provider._from_writer_markdown(
+            markdown, bridge, note, fs, MediaAssetLibrary(library_id='media-library-test'),
         )
 
-        assert normalized == '![[diagram.png]]\n'
-        assert 'lazymind-obsidian-media://' not in normalized
+        assert restored == '![[diagram.png]]\n'
 
     def test_existing_external_image_keeps_its_url_on_write_back(self, tmp_path):
         provider = ObsidianWriterProvider()
@@ -392,3 +338,22 @@ class TestObsidianWriterProvider:
 
         assert restored == '![[assets/lazymind/generated.png]]\n'
         fs.copy_attachment.assert_called_once_with(note, workspace_image)
+
+    def test_unregistered_local_image_is_not_copied_into_the_vault(self, tmp_path):
+        provider = ObsidianWriterProvider()
+        note = _note(tmp_path)
+        local_image = tmp_path / 'unregistered.png'
+        local_image.write_bytes(b'unregistered')
+        fs = MagicMock()
+        markdown = f'![Unregistered]({local_image.as_uri()})\n'
+
+        restored = provider._from_writer_markdown(
+            markdown,
+            {},
+            note,
+            fs,
+            MediaAssetLibrary(library_id='media-library-test'),
+        )
+
+        assert restored == markdown
+        fs.copy_attachment.assert_not_called()
