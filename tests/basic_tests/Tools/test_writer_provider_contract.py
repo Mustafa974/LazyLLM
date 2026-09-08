@@ -16,6 +16,7 @@ from lazyllm.tools.writer.provider import (
     FeishuWriterProvider,
     GitHubWriterProvider,
     NotionWriterProvider,
+    ObsidianWriterProvider,
     WeChatWriterProvider,
     WriterProviderBase,
     WriterProviderCapabilityError,
@@ -53,6 +54,10 @@ def test_optional_provider_capabilities_default_to_unsupported():
         (WeChatWriterProvider, {
             'load': True, 'create': True, 'replace': True, 'append': False,
             'patch': True, 'revision_check': True, 'media': True,
+        }),
+        (ObsidianWriterProvider, {
+            'load': True, 'create': True, 'replace': True, 'append': False,
+            'patch': False, 'revision_check': True, 'media': True,
         }),
     ],
 )

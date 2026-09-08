@@ -317,7 +317,7 @@ class WriterResourceTools(WriterToolBase):
                 'content not written to any platform',
                 mode,
             )
-            return self._save_write_result({})
+            return self._save_write_result('', '', '', 0)
         media_library = self._unified_optional_model(media_assets, MediaAssetLibrary)
         provider = self._writer_provider(target, source_document)
         provider_key = provider.provider
@@ -335,9 +335,14 @@ class WriterResourceTools(WriterToolBase):
                 raise WriterProviderWriteOutcomeError(provider.provider, mode) from exc
             raise
         return self._save_write_result(
-            result,
-            adapter=provider_key,
-            locator=target.uri,
+            str(result.get('doc_id') or ''),
+            str(result.get('adapter') or provider_key),
+            str(result.get('locator') or target.uri or ''),
+            int(result.get('block_count') or 0),
+            list(result.get('warnings') or []),
+            provider_result=result,
+            persisted_document=result.get('persisted_document'),
+            representation=str(result.get('representation') or ''),
         )
 
     def apply_patch_to_document(  # noqa: C901
@@ -415,16 +420,16 @@ class WriterResourceTools(WriterToolBase):
 
     def _save_write_result(
         self,
-        result: Dict[str, Any],
-        *,
-        adapter: str = '',
-        locator: str = '',
+        document_id: str,
+        adapter: str,
+        locator: str,
+        block_count: int,
+        warnings: Optional[List[str]] = None,
+        provider_result: Optional[Dict[str, Any]] = None,
+        persisted_document: Any = None,
+        representation: str = '',
     ) -> dict:
-        write_result = dict(result or {})
-        document_id = str(write_result.get('doc_id') or '')
-        adapter = str(write_result.get('adapter') or adapter or '')
-        locator = str(write_result.get('locator') or locator or '')
-        block_count = int(write_result.get('block_count') or 0)
+        write_result = dict(provider_result or {})
         write_result.update({
             'doc_id': document_id,
             'adapter': adapter,
@@ -432,7 +437,6 @@ class WriterResourceTools(WriterToolBase):
             'block_count': block_count,
         })
         artifacts: Dict[str, Any] = {'write_result': write_result}
-        persisted_document = write_result.get('persisted_document')
         if persisted_document is not None:
             artifacts['persisted_document'] = persisted_document
         return self._save_artifacts(
@@ -441,10 +445,10 @@ class WriterResourceTools(WriterToolBase):
             primary_key='write_result',
             summary='Wrote content to target document.' if document_id else 'No target document was provided.',
             counts={'blocks': block_count},
-            warnings=list(write_result.get('warnings') or []),
+            warnings=warnings,
             extra={
                 'adapter': adapter,
                 'document_id': document_id,
-                'representation': str(write_result.get('representation') or '') or None,
+                'representation': representation or None,
             },
         ).model_dump()

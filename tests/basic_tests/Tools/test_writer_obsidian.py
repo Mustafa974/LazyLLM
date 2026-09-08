@@ -4,6 +4,8 @@ from lazyllm.tools.fs.supplier import obsidian as obsidian_fs
 from lazyllm.tools.fs.supplier.obsidian import ObsidianFS, ObsidianNote, ObsidianVault
 from lazyllm.tools.writer.data_models.multimodal import MediaAsset, MediaAssetLibrary
 from lazyllm.tools.writer.data_models.task import TargetDocument
+from lazyllm.tools.writer.data_models.writer_ir import WriterDocument
+from lazyllm.tools.writer.provider.base import WriterProviderDocument
 from lazyllm.tools.writer.provider.obsidian import ObsidianWriterProvider
 
 
@@ -86,6 +88,48 @@ class TestObsidianDisplayPath:
 
 
 class TestObsidianWriterProvider:
+    def test_native_markdown_provider_contract(self):
+        provider = ObsidianWriterProvider()
+        converted = provider.convert_document('# Note\n')
+
+        assert isinstance(converted, WriterProviderDocument)
+        assert converted.provider == 'obsidian'
+        assert converted.format == 'markdown'
+        assert converted.content == '# Note\n'
+
+        document = WriterDocument(
+            document_id='writer-document',
+            title='Note',
+            blocks=[{'node_id': 'body', 'type': 'paragraph', 'content': 'Body'}],
+        )
+        converted_ir = provider.convert_document(document)
+        assert converted_ir.format == 'markdown'
+        assert converted_ir.content == '# Note\n\nBody\n'
+        assert converted_ir.source_document.document_id == 'writer-document'
+
+    def test_write_document_delegates_native_markdown_write(self, monkeypatch):
+        provider = ObsidianWriterProvider()
+        target = TargetDocument(adapter='obsidian', uri='obsidian://vlt_test/note.md')
+        converted = provider.convert_document('# Note\n', target=target)
+        captured = {}
+
+        def replace_document(content, write_target, *, media_assets=None):
+            captured.update({
+                'content': content,
+                'target': write_target,
+                'media_assets': media_assets,
+            })
+            return {'doc_id': 'vlt_test:note.md', 'adapter': 'obsidian', 'locator': target.uri}
+
+        monkeypatch.setattr(provider, 'replace_document', replace_document)
+
+        result = provider.write_document(converted, target)
+
+        assert captured['content'] == '# Note\n'
+        assert captured['target'] is target
+        assert result['representation'] == 'markdown'
+        assert result['published_link'] == ''
+
     def test_write_result_includes_the_host_local_path(self, tmp_path, monkeypatch):
         root = tmp_path / 'scan-root'
         vault_root = root / 'obs'

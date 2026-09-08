@@ -14,7 +14,12 @@ from lazyllm.tools.fs.supplier.obsidian import (
     ObsidianNote,
 )
 
-from .base import WriterProviderBase
+from .base import (
+    WriterProviderBase,
+    WriterProviderCapabilities,
+    WriterProviderDocument,
+    WriterProviderWriteMode,
+)
 from ..data_models.multimodal import MediaAssetLibrary
 from ..data_models.task import InputResource, TargetDocument
 from ..data_models.writer_ir import WriterDocument, WriterStage
@@ -37,6 +42,13 @@ class ObsidianWriterProvider(WriterProviderBase):
     """Bridge an Obsidian Markdown note through Writer's Markdown path."""
 
     provider = 'obsidian'
+    capabilities = WriterProviderCapabilities(
+        load=True,
+        create=True,
+        replace=True,
+        revision_check=True,
+        media=True,
+    )
 
     @classmethod
     def matches(cls, locator: str) -> bool:
@@ -47,6 +59,53 @@ class ObsidianWriterProvider(WriterProviderBase):
         if not self.matches(value):
             raise ValueError('Invalid Obsidian document locator.')
         return TargetDocument(uri=value, adapter=self.provider)
+
+    def convert_document(
+        self,
+        content: WriterDocument | str,
+        *,
+        target: TargetDocument | None = None,
+        media_assets: MediaAssetLibrary | None = None,
+    ) -> WriterProviderDocument:
+        if isinstance(content, WriterDocument):
+            markdown = self._serialize_writer_document(content, media_assets)
+            source_document = content.model_copy(deep=True)
+        elif isinstance(content, str):
+            markdown = content
+            source_document = self._writer_document(markdown, media_assets)
+        else:
+            raise TypeError('Obsidian Writer Provider accepts Markdown or WriterDocument content.')
+        return WriterProviderDocument(
+            provider=self.provider,
+            format='markdown',
+            content=markdown,
+            source_document=source_document,
+        )
+
+    def write_document(
+        self,
+        converted: WriterProviderDocument,
+        target: TargetDocument,
+        *,
+        media_assets: MediaAssetLibrary | None = None,
+        mode: WriterProviderWriteMode = 'replace',
+    ) -> dict:
+        if converted.provider != self.provider or converted.format != 'markdown':
+            raise ValueError('Obsidian write_document requires converted Obsidian Markdown.')
+        if not isinstance(converted.content, str):
+            raise TypeError('Converted Obsidian content must be a Markdown string.')
+        if mode != 'replace':
+            raise ValueError('Obsidian write_document only supports replace mode.')
+        result = self.replace_document(
+            converted.content,
+            target,
+            media_assets=media_assets,
+        )
+        return {
+            **result,
+            'representation': 'markdown',
+            'published_link': '',
+        }
 
     def load_document(
         self,
