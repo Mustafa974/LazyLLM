@@ -103,6 +103,7 @@ class ObsidianWriterProvider(WriterProviderBase):
         )
         return {
             **result,
+            'persisted_document': converted.content,
             'representation': 'markdown',
             'published_link': '',
         }
@@ -122,6 +123,7 @@ class ObsidianWriterProvider(WriterProviderBase):
         resolved.adapter = self.provider
         resolved.title = resolved.title or Path(note.relative_path).stem
         resolved.meta['obsidian_bridge'] = bridge
+        resolved.meta['local_path'] = fs.display_note_path(note)
         resources = self._image_resources(bridge, resolved)
         return {
             'representation': 'markdown',
@@ -139,12 +141,14 @@ class ObsidianWriterProvider(WriterProviderBase):
         Obsidian has no remote parent container to resolve here: the first
         discovered Vault is the explicit local default.
         """
-        note = self._fs().create_note(title)
+        fs = self._fs()
+        note = fs.create_note(title)
         return TargetDocument(
             doc_id=self._document_id(note),
             uri=self._canonical_uri(note),
             adapter=self.provider,
             title=Path(note.relative_path).stem,
+            meta={'local_path': fs.display_note_path(note)},
         )
 
     def replace_document(
@@ -171,6 +175,7 @@ class ObsidianWriterProvider(WriterProviderBase):
             bridge['source_hash'] = self._hash(restored)
             target.meta['obsidian_bridge'] = bridge
         local_path = fs.display_note_path(note)
+        target.meta['local_path'] = local_path
         return {
             'doc_id': self._document_id(note),
             'adapter': self.provider,

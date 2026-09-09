@@ -127,6 +127,7 @@ class TestObsidianWriterProvider:
 
         assert captured['content'] == '# Note\n'
         assert captured['target'] is target
+        assert result['persisted_document'] == '# Note\n'
         assert result['representation'] == 'markdown'
         assert result['published_link'] == ''
 
@@ -150,8 +151,22 @@ class TestObsidianWriterProvider:
             result = provider.replace_document('After', target)
 
         assert result['local_path'] == '/Users/test/Documents/obs/note.md'
+        assert target.meta['local_path'] == '/Users/test/Documents/obs/note.md'
         assert target.meta['obsidian_bridge']['source_hash'] == provider._hash('After\n')
         assert note.path.read_text(encoding='utf-8') == 'After\n'
+
+    def test_create_target_keeps_the_host_local_path(self, tmp_path, monkeypatch):
+        root = tmp_path / 'scan-root'
+        vault_root = root / 'obs'
+        _vault(vault_root)
+        fs = ObsidianFS(token=str(root))
+        provider = ObsidianWriterProvider()
+        monkeypatch.setattr(ObsidianWriterProvider, '_fs', staticmethod(lambda: fs))
+
+        with obsidian_fs.config.temp('obsidian_host_root', '/Users/test/Documents'):
+            target = provider.create_document('New Note')
+
+        assert target.meta['local_path'] == '/Users/test/Documents/obs/New Note.md'
 
     def test_canonical_uri_escapes_and_resolves_special_path(self, tmp_path, monkeypatch):
         provider = ObsidianWriterProvider()
@@ -254,6 +269,7 @@ class TestObsidianWriterProvider:
         assert loaded['input_resources'][0].uri == image.as_uri()
         assert loaded['input_resources'][0].meta['source_reference'] == 'diagram.png'
         assert loaded['resource_warnings'] == []
+        assert loaded['target_document'].meta['local_path'] == str(note_path)
 
     def test_bridged_vault_image_restores_raw_embed_after_media_materialization(self, tmp_path):
         provider = ObsidianWriterProvider()
