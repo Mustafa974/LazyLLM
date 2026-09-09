@@ -80,6 +80,10 @@ _CODE_FENCE_OPEN_RE = re.compile(
     r'^(?P<indent>[ \t]{0,3})(?P<fence>`{3,}|~{3,})'
     r'(?P<info>[^\r\n]*)(?P<newline>\r?\n|$)',
 )
+_WRITER_USER_ANCHOR_LINE_RE = re.compile(
+    r''' {0,3}<a[ \t]+id=(?P<quote>["'])block-user-[^\s"'<>]+(?P=quote)'''
+    r'[ \t]*(?:>[ \t]*</a>|/>)[ \t]*(?:\r?\n|$)',
+)
 _MAX_ASSET_BYTES = 20 * 1024 * 1024
 _MAX_WRITE_ASSET_BYTES = 50 * 1024 * 1024
 
@@ -150,7 +154,7 @@ def _html_image_layout_body(source: str) -> str:
     for index, image in enumerate(images):
         blocks.append(image)
         if index < len(captions):
-            blocks.append(f'_{captions[index]}_')
+            blocks.append(f'*{captions[index]}*')
     return '\n\n'.join(blocks)
 
 
@@ -245,6 +249,28 @@ def _normalize_code_fences(markdown: str) -> tuple[str, list[dict[str, str]]]:
         normalized.append(display)
         index = end
     return ''.join(normalized), layouts
+
+
+def _strip_writer_user_anchors(markdown: str) -> str:
+    '''Remove standalone editor anchors from published Markdown, preserving code blocks.'''
+    output: list[str] = []
+    closing_re: re.Pattern | None = None
+    for line in markdown.splitlines(keepends=True):
+        if closing_re is not None:
+            output.append(line)
+            if closing_re.match(line):
+                closing_re = None
+            continue
+        opening = _CODE_FENCE_OPEN_RE.match(line)
+        if opening is not None:
+            fence = opening.group('fence')
+            closing_re = re.compile(
+                rf'^[ \t]{{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*(?:\r?\n|$)',
+            )
+        elif _WRITER_USER_ANCHOR_LINE_RE.fullmatch(line):
+            continue
+        output.append(line)
+    return ''.join(output)
 
 
 def _image_references(markdown: str) -> set[str]:
@@ -661,7 +687,7 @@ class GitHubWriterProvider(WriterProviderBase):
         if not target.meta.get('revision'):
             refreshed = fs.resolve_target(self._locator(target))
             target = self._merge_target(target, refreshed)
-        markdown = content
+        markdown = _strip_writer_user_anchors(content)
         if media_assets is not None:
             markdown = self._restore_imported_media_references(markdown, media_assets)
         markdown = self._restore_html_image_layouts(markdown, target)
