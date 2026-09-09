@@ -275,6 +275,11 @@ class ObsidianFS(LazyLLMFSBase):
     def _abspath(self, path: str) -> str:
         parts = self._parse_path(path)
         vault_p = Path(self._vault_root).resolve()
+        if not (vault_p / '.obsidian').is_dir():
+            raise PermissionError(
+                'Generic ObsidianFS operations require a single Vault root; '
+                'scan-root mode is discovery/provider-only.'
+            )
         if not parts:
             return str(vault_p)
         full = vault_p.joinpath(*parts).resolve()

@@ -60,7 +60,7 @@ class ObsidianWriterProvider(WriterProviderBase):
             raise ValueError('Invalid Obsidian document locator.')
         return TargetDocument(uri=value, adapter=self.provider)
 
-    def convert_document(
+    def _convert_native_document(
         self,
         content: WriterDocument | str,
         *,

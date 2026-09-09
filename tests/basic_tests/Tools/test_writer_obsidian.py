@@ -64,6 +64,28 @@ class TestObsidianVaultDiscovery:
         assert {item.root for item in cached_scan} == {first}
         assert {item.root for item in refreshed_scan} == {first, second}
 
+    def test_scan_root_rejects_generic_file_operations(self, tmp_path):
+        root = tmp_path / 'scan-root'
+        _vault(root / 'obs')
+        outside = root / 'outside.txt'
+        outside.write_text('original', encoding='utf-8')
+        fs = ObsidianFS(token=str(root))
+
+        try:
+            fs.ls('')
+        except PermissionError as exc:
+            assert 'scan-root mode' in str(exc)
+        else:
+            raise AssertionError('scan-root generic listing should be rejected')
+
+        try:
+            fs.write('outside.txt', 'changed')
+        except PermissionError as exc:
+            assert 'scan-root mode' in str(exc)
+        else:
+            raise AssertionError('scan-root generic writes should be rejected')
+        assert outside.read_text(encoding='utf-8') == 'original'
+
 
 class TestObsidianDisplayPath:
     def test_returns_the_real_path_without_a_host_mapping(self, tmp_path):
