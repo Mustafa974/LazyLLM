@@ -242,14 +242,30 @@ class WeChatClient:
                 **kwargs,
             )
             response.raise_for_status()
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, 'response', None), 'status_code', None)
+            body = str(getattr(getattr(exc, 'response', None), 'text', '') or '').strip()
+            detail = f'HTTP {status}' if status is not None else str(exc)
+            if body:
+                detail += f'; response={body[:1000]}'
+            print(f'WeChat API {path} HTTP failure: {detail}', flush=True)
+            raise RuntimeError(f'WeChat API {path} request failed: {detail}') from exc
+        try:
             payload = json.loads(response.content.decode('utf-8-sig'))
-        except (requests.RequestException, ValueError) as exc:
-            raise RuntimeError(f'WeChat API {path} request failed: {exc}') from exc
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            body = str(getattr(response, 'text', '') or '').strip()
+            detail = f'response={body[:1000]}' if body else str(exc)
+            raise RuntimeError(f'WeChat API {path} returned invalid JSON: {detail}') from exc
         if not isinstance(payload, dict):
             raise TypeError(f'WeChat API {path} returned an invalid response.')
         errcode = payload.get('errcode')
         if errcode not in (None, 0, '0'):
             errmsg = str(payload.get('errmsg') or 'unknown error')
+            print(
+                f'WeChat API {path} returned error: errcode={errcode}; '
+                f'errmsg={errmsg}; payload={json.dumps(payload, ensure_ascii=False)[:1000]}',
+                flush=True,
+            )
             raise RuntimeError(f'WeChat API {path} failed ({errcode}): {errmsg}')
         return payload
 
@@ -424,6 +440,7 @@ class WeChatWriterProvider(WriterProviderBase):
         *,
         target: TargetDocument | None = None,
         media_assets: MediaAssetLibrary | None = None,
+        template: str | None = None,
     ) -> WriterProviderDocument:
         document = self._writer_document(content, media_assets)
         media_references: dict[str, str] = {}
@@ -445,15 +462,53 @@ class WeChatWriterProvider(WriterProviderBase):
             if not asset_id or not url:
                 raise ValueError(f'Image block {block.node_id!r} media is unavailable.')
             media_references[asset_id] = url
-        html = WeChatWriterAdapter().document_to_html(document, media_references)
-        if len(html) > 20_000 or len(html.encode('utf-8')) > 1024 * 1024:
-            raise ValueError('WeChat draft HTML exceeds the platform content limit.')
+        html = WeChatWriterAdapter().document_to_html(
+            document, media_references, template=template,
+        )
         return WriterProviderDocument(
             provider=self.provider,
             format='html',
             content=html,
             source_document=document,
             media_references=media_references,
+        )
+
+    def convert_document(
+        self,
+        content: WriterDocument | str,
+        *,
+        target: TargetDocument | None = None,
+        media_assets: MediaAssetLibrary | None = None,
+        output_format: str = 'native',
+        template: str | None = None,
+    ) -> WriterProviderDocument:
+        if output_format != 'native':
+            return super().convert_document(
+                content,
+                target=target,
+                media_assets=media_assets,
+                output_format=output_format,
+            )
+        return self._convert_native_document(
+            content,
+            target=target,
+            media_assets=media_assets,
+            template=template,
+        )
+
+    def convert_document_with_template(
+        self,
+        content: WriterDocument | str,
+        *,
+        target: TargetDocument | None = None,
+        media_assets: MediaAssetLibrary | None = None,
+        template: str | None = None,
+    ) -> WriterProviderDocument:
+        return self.convert_document(
+            content,
+            target=target,
+            media_assets=media_assets,
+            template=template,
         )
 
     def write_document(
@@ -582,18 +637,17 @@ class WeChatWriterProvider(WriterProviderBase):
         ).strip()
         if not media_id:
             raise ValueError('WeChat patch requires a bound draft media_id.')
-        if source_document.revision is None:
-            raise ValueError('WeChat patch requires the source document revision.')
-        baseline = WeChatClient(self._access_token()).get_draft(media_id)
-        current_revision = baseline.get('update_time')
-        if current_revision is None:
-            current_revision = baseline.get('updateTime')
-        if str(current_revision) != source_document.revision:
-            raise WriterProviderRevisionError(
-                self.provider,
-                source_document.revision,
-                str(current_revision) if current_revision is not None else None,
-            )
+        if source_document.revision is not None:
+            baseline = WeChatClient(self._access_token()).get_draft(media_id)
+            current_revision = baseline.get('update_time')
+            if current_revision is None:
+                current_revision = baseline.get('updateTime')
+            if str(current_revision) != source_document.revision:
+                raise WriterProviderRevisionError(
+                    self.provider,
+                    source_document.revision,
+                    str(current_revision) if current_revision is not None else None,
+                )
         revised, patch_result = apply_patch_to_ir(
             source_document, patch_set, media_assets=media_assets)
         write_result = self.replace_document(revised, target, media_assets=media_assets)

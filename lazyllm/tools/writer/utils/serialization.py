@@ -653,11 +653,9 @@ def _markdown_spans_from_token(token: Dict[str, Any]) -> List[WriterSpan]:
 def _markdown_block_content(token: Dict[str, Any]) -> tuple[str, str]:
     token_type = token.get('type')
     if token_type == 'block_code':
-        info = str((token.get('attrs') or {}).get('info') or '').strip()
-        return f'```{info}\n{str(token.get("raw") or "").rstrip()}\n```', 'code'
+        return str(token.get('raw') or '').rstrip(), 'code'
     if token_type == 'block_quote':
-        content = _markdown_token_text(token).strip()
-        return '\n'.join(f'> {line}' for line in content.splitlines()), 'quote'
+        return _markdown_token_text(token).strip(), 'quote'
     if token_type == 'table':
         rows = []
         for row in token.get('children') or []:

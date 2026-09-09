@@ -17,6 +17,7 @@ from ..numbering import (
     compute_numbering,
     format_target_number,
 )
+from ..templates.wechat import WeChatTemplate, get_wechat_template
 from ..utils import strip_heading_numbering
 from .base import NativeBlock, NativePatchOperation, WriterAdapterBase
 
@@ -28,48 +29,29 @@ _VOID_TAGS = {
 _KNOWN_INLINE_TAGS = {'a', 'b', 'br', 'code', 'del', 'em', 'i', 's', 'span', 'strong', 'sub', 'sup', 'u'}
 _KNOWN_BLOCK_TAGS = {'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'img', 'ol', 'p', 'pre', 'table', 'ul'}
 
-# WeChat's draft editor does not consistently apply browser-default semantic
-# styles. Keep the fallback theme small and provider-local; documents that were
-# read from WeChat prefer their own source styles below.
-_WECHAT_HEADING_STYLE_PROFILE: dict[int, dict[str, str]] = {
-    1: {
-        'font-size': '20px',
-        'font-weight': '700',
-        'line-height': '1.6',
-        'margin': '24px 0 12px',
-    },
-    2: {
-        'font-size': '18px',
-        'font-weight': '700',
-        'line-height': '1.6',
-        'margin': '20px 0 10px',
-    },
-    3: {
-        'font-size': '16px',
-        'font-weight': '700',
-        'line-height': '1.6',
-        'margin': '16px 0 8px',
-    },
-}
-
-_WECHAT_CAPTION_STYLE_PROFILE: dict[str, str] = {
-    'color': '#6b7280',
-    'font-size': '13px',
-    'line-height': '1.6',
-    'margin': '8px 0 18px',
-    'text-align': 'center',
-}
-
 _WECHAT_SAFE_CSS_PROPERTIES = frozenset({
-    'background-color', 'border', 'border-bottom', 'border-left', 'border-right',
+    'background-color', 'border', 'border-bottom', 'border-collapse', 'border-left', 'border-right',
     'border-top', 'border-radius', 'color', 'display', 'font-family', 'font-size',
     'font-style', 'font-weight', 'letter-spacing', 'line-height', 'margin',
     'margin-bottom', 'margin-left', 'margin-right', 'margin-top', 'max-height',
     'max-width', 'min-height', 'min-width', 'object-fit', 'opacity', 'padding',
     'padding-bottom', 'padding-left', 'padding-right', 'padding-top', 'text-align',
     'text-decoration', 'text-indent', 'vertical-align', 'white-space', 'width',
-    'height',
+    'height', 'word-break',
 })
+
+_WECHAT_TABLE_STYLE = {
+    'background-color': '#ffffff', 'border-collapse': 'collapse', 'color': '#111111',
+    'font-size': '14px', 'line-height': '1.5', 'margin': '12px 0', 'width': '100%',
+}
+_WECHAT_TABLE_HEADER_STYLE = {
+    'background-color': '#ffffff', 'border': '1px solid #222222',
+    'font-weight': '700', 'padding': '6px 8px', 'vertical-align': 'top',
+}
+_WECHAT_TABLE_CELL_STYLE = {
+    'background-color': '#ffffff', 'border': '1px solid #222222',
+    'padding': '6px 8px', 'vertical-align': 'top', 'word-break': 'break-word',
+}
 
 _WECHAT_SAFE_IMAGE_ATTRIBUTES = frozenset({
     'alt', 'align', 'class', 'height', 'id', 'src', 'style', 'title', 'width',
@@ -762,11 +744,18 @@ class WeChatWriterAdapter(WriterAdapterBase):
         self,
         document: WriterDocument,
         image_urls: dict[str, str] | None = None,
+        template: str | None = None,
     ) -> str:
-        '''Render Writer IR as WeChat draft HTML.'''
+        '''Render Writer IR as WeChat draft HTML using a named template.'''
+        selected_template = get_wechat_template(template)
+        preserve_source = not str(template or '').strip()
         source = document.metadata.get('wechat_html_source')
         source_snapshot = document.metadata.get('wechat_html_snapshot')
-        if isinstance(source, str) and source_snapshot == _document_snapshot(document):
+        if (
+            preserve_source
+            and isinstance(source, str)
+            and source_snapshot == _document_snapshot(document)
+        ):
             return source
         images = image_urls or {}
         numbering = compute_numbering(build_numbering_view_from_ir(document))
@@ -774,19 +763,28 @@ class WeChatWriterAdapter(WriterAdapterBase):
         if not isinstance(metadata_styles, Mapping):
             metadata_styles = {}
         heading_styles: dict[str, str] = {}
-        for key, value in metadata_styles.items():
-            style = _style_text(value)
-            if style:
-                heading_styles[str(key)] = style
-        heading_styles.update(_heading_style_map(document.blocks))
-        caption_style = _style_text(document.metadata.get('wechat_caption_style'))
-        if not caption_style:
+        if preserve_source:
+            for key, value in metadata_styles.items():
+                style = _style_text(value)
+                if style:
+                    heading_styles[str(key)] = style
+            heading_styles.update(_heading_style_map(document.blocks))
+        caption_style = ''
+        if preserve_source:
+            caption_style = _style_text(document.metadata.get('wechat_caption_style'))
+        if not caption_style and preserve_source:
             caption_style = _caption_style(document.blocks)
         if not caption_style:
-            caption_style = _style_text(_WECHAT_CAPTION_STYLE_PROFILE)
-        return ''.join(self._render_sequence(
+            caption_style = _style_text(selected_template.caption_style())
+        body = ''.join(self._render_sequence(
             document.blocks, images, numbering, heading_styles, caption_style,
+            selected_template, preserve_source,
         ))
+        if preserve_source:
+            return body
+        style = _style_text(selected_template.paragraph_style())
+        style_attr = f' style="{escape(style, quote=True)}"' if style else ''
+        return f'<section{style_attr}>{body}</section>'
 
     def _render_sequence(
         self,
@@ -795,6 +793,8 @@ class WeChatWriterAdapter(WriterAdapterBase):
         numbering: dict[str, NumberingEntry],
         heading_styles: Mapping[str, str],
         caption_style: str,
+        template: WeChatTemplate,
+        preserve_source: bool,
     ) -> list[str]:
         rendered: list[str] = []
         index = 0
@@ -802,22 +802,21 @@ class WeChatWriterAdapter(WriterAdapterBase):
             block = blocks[index]
             if block.type == 'list_item':
                 ordered = bool(block.numbering.get('ordered'))
-                items: list[str] = []
+                items: list[WriterBlock] = []
                 while index < len(blocks):
                     item = blocks[index]
                     if item.type != 'list_item' or bool(item.numbering.get('ordered')) != ordered:
                         break
-                    body = self._render_inline(item)
-                    children = ''.join(self._render_sequence(
-                        item.children, images, numbering, heading_styles, caption_style,
-                    ))
-                    items.append(f'<li>{body}{children}</li>')
+                    items.append(item)
                     index += 1
-                tag = 'ol' if ordered else 'ul'
-                rendered.append(f'<{tag}>{"".join(items)}</{tag}>')
+                rendered.append(self._render_list_items(
+                    items, ordered, images, numbering, heading_styles, caption_style,
+                    template, preserve_source,
+                ))
                 continue
             rendered.append(self._render_block(
-                block, images, numbering, heading_styles, caption_style,
+                block, images, numbering, heading_styles, caption_style, template,
+                preserve_source,
             ))
             index += 1
         return rendered
@@ -829,11 +828,13 @@ class WeChatWriterAdapter(WriterAdapterBase):
         numbering: dict[str, NumberingEntry],
         heading_styles: Mapping[str, str],
         caption_style: str,
+        template: WeChatTemplate,
+        preserve_source: bool,
     ) -> str:
         entry = numbering.get(block.node_id)
         label = format_target_number(entry) if entry is not None else ''
         raw = _raw_if_unchanged(block)
-        if raw is not None:
+        if raw is not None and (preserve_source or block.type == 'wechat_opaque'):
             if block.type != 'heading':
                 return raw
             source_label = block.provider_payload.get('source_number_label')
@@ -848,17 +849,21 @@ class WeChatWriterAdapter(WriterAdapterBase):
                 f'Unsupported WeChat HTML block {block.node_id!r} cannot be modified.')
         if block.type == 'wechat_list':
             return self._render_list(
-                block, images, numbering, heading_styles, caption_style,
+                block, images, numbering, heading_styles, caption_style, template,
+                preserve_source,
             )
         body = self._render_inline(block)
         children = ''.join(self._render_sequence(
-            block.children, images, numbering, heading_styles, caption_style,
+            block.children, images, numbering, heading_styles, caption_style, template,
+            preserve_source,
         ))
         if block.type == 'heading':
             level = int(block.numbering.get('level') or 1)
             heading = min(max(level + 1, 2), 4)
             title = f'{escape(label)} {body}'.strip()
-            style = _style_text(block.provider_payload.get('wechat_heading_style'))
+            style = ''
+            if preserve_source:
+                style = _style_text(block.provider_payload.get('wechat_heading_style'))
             source_level = block.provider_payload.get('wechat_heading_level')
             if (
                 style
@@ -870,9 +875,7 @@ class WeChatWriterAdapter(WriterAdapterBase):
             if not style:
                 style = heading_styles.get(str(max(1, min(5, level))), '')
             if not style:
-                style = _style_text(_WECHAT_HEADING_STYLE_PROFILE[
-                    min(3, max(1, level))
-                ])
+                style = _style_text(template.heading_style(level))
             style_attr = f' style="{escape(style, quote=True)}"' if style else ''
             return f'<h{heading}{style_attr}>{title}</h{heading}>{children}'
         if block.type == 'image':
@@ -887,7 +890,10 @@ class WeChatWriterAdapter(WriterAdapterBase):
             if not url:
                 raise ValueError(f'Image block {block.node_id!r} media is unavailable.')
             caption_text = block.content.strip()
-            caption_config = block.provider_payload.get('wechat_image_caption')
+            caption_config = (
+                block.provider_payload.get('wechat_image_caption')
+                if preserve_source else None
+            )
             caption_tag = 'p'
             caption_attrs: Mapping[str, Any] = {}
             if isinstance(caption_config, Mapping):
@@ -908,6 +914,8 @@ class WeChatWriterAdapter(WriterAdapterBase):
                 if caption_text else ''
             )
             image_attrs = block.provider_payload.get('wechat_image_attrs')
+            if not preserve_source and isinstance(image_attrs, Mapping):
+                image_attrs = {key: value for key, value in image_attrs.items() if key != 'style'}
             image_attrs_html = _serialize_attrs(
                 image_attrs,
                 allowed=_WECHAT_SAFE_IMAGE_ATTRIBUTES,
@@ -923,6 +931,8 @@ class WeChatWriterAdapter(WriterAdapterBase):
                     wrapper_tag = candidate_tag
                 if isinstance(wrapper.get('attrs'), Mapping):
                     wrapper_attrs = wrapper['attrs']
+            if not preserve_source and isinstance(wrapper_attrs, Mapping):
+                wrapper_attrs = {key: value for key, value in wrapper_attrs.items() if key != 'style'}
             wrapper_attrs_html = _serialize_attrs(
                 wrapper_attrs,
                 allowed=_WECHAT_SAFE_WRAPPER_ATTRIBUTES,
@@ -934,13 +944,19 @@ class WeChatWriterAdapter(WriterAdapterBase):
         if block.type == 'table':
             return f'{self._render_table(block.content)}{children}'
         if block.type in {'quote', 'callout'}:
-            return f'<blockquote>{body}</blockquote>{children}'
+            style = _style_text(template.quote_style())
+            style_attr = f' style="{escape(style, quote=True)}"' if style else ''
+            return f'<blockquote{style_attr}>{body}</blockquote>{children}'
         if block.type in {'code', 'code_block'}:
             language = str(getattr(block, 'language', '') or '').strip()
             code_class = f' class="language-{escape(language, quote=True)}"' if language else ''
-            return f'<pre><code{code_class}>{escape(block.content)}</code></pre>{children}'
+            style = _style_text(template.code_style())
+            style_attr = f' style="{escape(style, quote=True)}"' if style else ''
+            return f'<pre{style_attr}><code{code_class}>{escape(block.content)}</code></pre>{children}'
         if block.type == 'divider':
-            return f'<hr />{children}'
+            style = _style_text(template.divider_style())
+            style_attr = f' style="{escape(style, quote=True)}"' if style else ''
+            return f'<hr{style_attr} />{children}'
         return (f'<p>{body}</p>' if body else '') + children
 
     def _render_list(
@@ -950,24 +966,65 @@ class WeChatWriterAdapter(WriterAdapterBase):
         numbering: dict[str, NumberingEntry],
         heading_styles: Mapping[str, str],
         caption_style: str,
+        template: WeChatTemplate,
+        preserve_source: bool,
     ) -> str:
-        tag = 'ol' if block.numbering.get('ordered') else 'ul'
-        items: list[str] = []
-        for item in block.children:
+        return self._render_list_items(
+            block.children, bool(block.numbering.get('ordered')), images, numbering,
+            heading_styles, caption_style, template, preserve_source,
+        )
+
+    def _render_list_items(
+        self,
+        items: list[WriterBlock],
+        ordered: bool,
+        images: dict[str, str],
+        numbering: dict[str, NumberingEntry],
+        heading_styles: Mapping[str, str],
+        caption_style: str,
+        template: WeChatTemplate,
+        preserve_source: bool,
+    ) -> str:
+        list_style = _style_text(template.list_style())
+        item_style = _style_text(template.list_item_style())
+        marker_style = _style_text(template.list_marker_style(ordered))
+        list_attr = f' style="{escape(list_style, quote=True)}"' if list_style else ''
+        item_attr = f' style="{escape(item_style, quote=True)}"' if item_style else ''
+        marker_attr = f' style="{escape(marker_style, quote=True)}"' if marker_style else ''
+        rendered: list[str] = []
+        for index, item in enumerate(items, start=1):
             if item.type != 'list_item':
                 raise ValueError(f'WeChat list contains invalid child {item.type!r}.')
-            body = self._render_inline(item)
+            number = item.numbering.get('number')
+            marker = escape(str(
+                number[-1] if isinstance(number, list) and number else index
+            )) if ordered else '&#8203;'
             children = ''.join(self._render_sequence(
-                item.children, images, numbering, heading_styles, caption_style,
+                item.children, images, numbering, heading_styles, caption_style, template,
+                preserve_source,
             ))
-            items.append(f'<li>{body}{children}</li>')
-        return f'<{tag}>{"".join(items)}</{tag}>'
+            rendered.append(
+                f'<p{item_attr}><span{marker_attr}>{marker}</span>'
+                f'{self._render_inline(item)}</p>{children}'
+            )
+        return f'<section{list_attr}>{"".join(rendered)}</section>'
 
     @staticmethod
     def _render_table(markdown: str) -> str:
         html = _TABLE_MARKDOWN(markdown).strip()
         if '<table>' not in html:
             raise ValueError('WeChat table block must contain a valid Markdown table.')
+        table_style = _style_text(_WECHAT_TABLE_STYLE)
+        header_style = _style_text(_WECHAT_TABLE_HEADER_STYLE)
+        cell_style = _style_text(_WECHAT_TABLE_CELL_STYLE)
+        html = html.replace(
+            '<table>',
+            f'<table style="{table_style}">',
+        )
+        html = html.replace('<th style="', f'<th style="{header_style};')
+        html = html.replace('<th>', f'<th style="{header_style}">')
+        html = html.replace('<td style="', f'<td style="{cell_style};')
+        html = html.replace('<td>', f'<td style="{cell_style}">')
         return html.replace('&lt;br&gt;', '<br />')
 
     @staticmethod

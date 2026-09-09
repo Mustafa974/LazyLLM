@@ -19,8 +19,10 @@ from lazyllm.tools.writer.provider.wechat import (
     WeChatWriterProvider,
 )
 from lazyllm.tools.writer.provider import WriterProviderRevisionError, match_writer_provider
+from lazyllm.tools.writer.templates.wechat import get_wechat_template, list_wechat_templates
 from lazyllm.tools.writer.tools.resource_tools import WriterResourceTools
 from lazyllm.tools.writer.utils.artifact import deserialize_artifact_json
+from lazyllm.tools.writer.utils.serialization import parse_document_markdown
 
 
 def _patch_wechat_client(monkeypatch, client):
@@ -55,6 +57,78 @@ def test_wechat_provider_matches_and_resolves_prompt(monkeypatch):
             'browser_url': 'https://mp.weixin.qq.com/',
         },
     )
+
+
+def test_wechat_templates_render_distinct_html_and_validate_ids():
+    document = WriterDocument(
+        document_id='template-document',
+        title='模板测试',
+        blocks=[
+            WriterBlock(node_id='heading', type='heading', content='标题', numbering={'level': 1}),
+            WriterBlock(node_id='paragraph', type='paragraph', content='正文'),
+            WriterBlock(node_id='bullet', type='list_item', content='无序列表', numbering={'ordered': False}),
+            WriterBlock(
+                node_id='number', type='list_item', content='有序列表',
+                numbering={'ordered': True, 'number': [2]},
+            ),
+            WriterBlock(node_id='quote', type='quote', content='引用'),
+            WriterBlock(node_id='code', type='code', content='print(1)'),
+            WriterBlock(
+                node_id='reference', type='paragraph', content='参见标题',
+                spans=[
+                    WriterSpan(text='参见'),
+                    WriterSpan(
+                        text='标题',
+                        style={'link': {'type': 'internal_ref', 'target_node_id': 'heading'}},
+                    ),
+                ],
+            ),
+            WriterBlock(
+                node_id='table', type='table',
+                content='| 项目 | 值 |\n| --- | --- |\n| 中文 | 正常 |',
+            ),
+        ],
+    )
+    adapter = WeChatWriterAdapter()
+
+    clean_html = adapter.document_to_html(document, template='clean')
+    structured_html = adapter.document_to_html(document, template='structured')
+    editorial_html = adapter.document_to_html(document, template='editorial')
+
+    assert len({clean_html, structured_html, editorial_html}) == 3
+    assert 'background-color:#edf7f3;border-left:5px solid #2f806d' in clean_html
+    assert clean_html.startswith(
+        '<section style="color:#33373d;font-size:16px;line-height:1.9;margin:0 0 16px">'
+    )
+    assert '<p>正文</p>' in clean_html
+    assert 'background-color:#2563eb;border-bottom:3px solid #1746aa' in structured_html
+    assert 'background-color:#faf2ec;border-left:3px solid #b9795f' in editorial_html
+    for html in (clean_html, structured_html, editorial_html):
+        assert '<ul' not in html and '<ol' not in html and '<li' not in html
+        assert '•' not in html and '::marker' not in html
+        assert '<span style=' in html and '>&#8203;</span>无序列表</p>' in html
+        assert '>2</span>有序列表</p>' in html
+        assert ' id=' not in html
+        assert 'href="#block-' not in html
+        assert '参见标题' in html
+        assert 'border-collapse:collapse' in html
+        assert 'border:1px solid #222222' in html
+        assert 'padding:6px 8px' in html
+    assert [item['id'] for item in list_wechat_templates()] == [
+        'clean', 'structured', 'editorial',
+    ]
+    assert get_wechat_template('wechat.structured').template_id == 'structured'
+    assert (
+        'background-color:#2563eb;border-radius:50%;display:inline-block;height:7px;'
+        'margin-left:-23px;margin-right:16px;vertical-align:middle;width:7px'
+    ) in structured_html
+    assert (
+        'background-color:#2563eb;border-radius:3px;color:#ffffff;display:inline-block;'
+        'font-size:12px;font-weight:700;height:22px;line-height:22px;margin-left:-28px;'
+        'margin-right:6px;min-width:22px;text-align:center;vertical-align:middle'
+    ) in structured_html
+    with pytest.raises(ValueError, match='Unknown WeChat template'):
+        get_wechat_template('not-found')
 
 
 def test_wechat_client_uses_draft_api_payloads(monkeypatch):
@@ -189,11 +263,15 @@ def test_wechat_draft_create_then_update(monkeypatch, tmp_path: Path):
     article = calls['updated'][2]
     assert article['thumb_media_id'] == 'cover-media'
     assert (
-        '<h2 style="font-size:20px;font-weight:700;line-height:1.6;margin:24px 0 12px">'
+        '<h2 style="background-color:#edf7f3;border-left:5px solid #2f806d;'
+        'border-radius:3px;color:#20584b;font-size:20px;font-weight:700;line-height:1.6;'
+        'margin:26px 0 12px;padding:8px 12px">'
         '1. 章节</h2>'
     ) in article['content']
     assert '<strong>粗体</strong>和<a href="https://example.com">链接</a>' in article['content']
-    assert '<table>' in article['content'] and '<td>中文</td>' in article['content']
+    assert ' id=' not in article['content']
+    assert 'border:1px solid #222222' in article['content']
+    assert '>中文</td>' in article['content']
     assert '&lt;script&gt;' in article['content'] and '<script>' not in article['content']
     assert 'https://mmbiz.qpic.cn/body.png' in article['content']
     assert updated['persisted_document'].provider_binding['document_id'] == 'draft-media'
@@ -327,10 +405,12 @@ def test_wechat_draft_read_patch_write_preserves_untouched_html(monkeypatch):
 
     adapter = WeChatWriterAdapter()
     assert adapter.document_to_html(document) == source_html
+    assert adapter.document_to_html(document, template='clean') != source_html
 
     target_block = document.blocks[-1].model_copy(deep=True)
     target_block.content = '修改后的正文'
     target_block.spans = []
+    document.revision = None
     patch = PatchSet(
         patch_id='patch-media-1',
         target_doc_id=document.document_id,
@@ -414,6 +494,35 @@ def test_wechat_patch_rejects_stale_remote_revision(monkeypatch):
         'expected_revision': '123',
         'actual_revision': '124',
     }
+
+
+def test_wechat_conversion_does_not_preempt_provider_content_limits():
+    document = WriterDocument(
+        document_id='long-document',
+        title='长文章',
+        blocks=[
+            WriterBlock(node_id=f'paragraph-{index}', type='paragraph', content='内容' * 125)
+            for index in range(81)
+        ],
+    )
+
+    converted = WeChatWriterProvider().convert_document(document, template='clean')
+
+    assert len(converted.content) > 20_000
+
+
+def test_wechat_markdown_code_and_quote_render_without_markdown_markers():
+    document = parse_document_markdown(
+        '```python\nprint(1)\n```\n\n> 引用正文',
+        document_id='markdown-article',
+        stage='final',
+    )
+
+    html = WeChatWriterAdapter().document_to_html(document, template='clean')
+
+    assert '<code>print(1)</code>' in html
+    assert '<blockquote' in html and '>引用正文</blockquote>' in html
+    assert '```' not in html and '&gt; 引用正文' not in html
 
 
 def test_wechat_writeback_renumbers_unchanged_heading_after_delete():

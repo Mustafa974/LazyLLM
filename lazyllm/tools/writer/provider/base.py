@@ -279,6 +279,22 @@ class WriterProviderBase(ABC):
     ) -> WriterProviderDocument:
         raise NotImplementedError
 
+    def convert_document_with_template(
+        self,
+        content: WriterDocument | str,
+        *,
+        target: TargetDocument | None = None,
+        media_assets: MediaAssetLibrary | None = None,
+        template: str | None = None,
+    ) -> WriterProviderDocument:
+        '''Convert content with an optional provider-specific presentation template.'''
+        if str(template or '').strip():
+            raise ValueError(
+                f'Writer provider {self.provider!r} does not support templates.')
+        return self.convert_document(
+            content, target=target, media_assets=media_assets,
+        )
+
     @abstractmethod
     def write_document(
         self,
