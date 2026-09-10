@@ -1209,6 +1209,22 @@ class GitHubWikiFS(_GitHubFSBase):
         self._git([*args, remote, str(checkout)])
         return checkout
 
+    def _checkout_file(self, checkout: Path, path: str, revision: str = 'HEAD') -> Path:
+        file_path = checkout / path
+        if file_path.is_file() and not file_path.is_symlink():
+            return file_path
+        entry = self._git(
+            ['--literal-pathspecs', 'ls-tree', '-z', revision, '--', path], cwd=str(checkout),
+        )
+        if not entry.startswith(('100644 blob ', '100755 blob ')):
+            raise GitHubFSError(
+                'GITHUB_WIKI_NOT_FOUND', 'GitHub Wiki file does not exist.', status_code=404,
+            )
+        self._git(
+            ['--literal-pathspecs', 'checkout', revision, '--', path], cwd=str(checkout),
+        )
+        return file_path
+
     def _resolved_target(
         self,
         owner: str,
@@ -1244,39 +1260,28 @@ class GitHubWikiFS(_GitHubFSBase):
         """Resolve and read files from one immutable Wiki checkout."""
         owner, repo, page_path = self._parse_target(path, document_only=True)
         with tempfile.TemporaryDirectory(prefix='lazyllm-github-wiki-') as root:
-            checkout = self._clone(owner, repo, root)
+            checkout = self._clone(owner, repo, root, materialize=False)
+            self._checkout_file(checkout, page_path)
             resolved = self._resolved_target(owner, repo, page_path, checkout)
 
             def read_bytes(resource: str) -> bytes:
                 resource_owner, resource_repo, resource_path = self._parse_target(resource)
                 if (resource_owner, resource_repo) != (owner, repo):
                     raise ValueError('GitHub Wiki read session cannot cross repositories.')
-                file_path = checkout / resource_path
-                if not file_path.is_file():
-                    raise GitHubFSError(
-                        'GITHUB_WIKI_NOT_FOUND',
-                        'GitHub Wiki resource does not exist.',
-                        status_code=404,
-                    )
+                file_path = self._checkout_file(checkout, resource_path, resolved['revision'])
                 return file_path.read_bytes()
 
             yield resolved, read_bytes
 
     def resolve_target(self, path: str) -> dict[str, Any]:
-        owner, repo, page_path = self._parse_target(path, document_only=True)
-        with tempfile.TemporaryDirectory(prefix='lazyllm-github-wiki-') as root:
-            checkout = self._clone(owner, repo, root)
-            return self._resolved_target(owner, repo, page_path, checkout)
+        with self.read_session(path) as (resolved, _):
+            return resolved
 
     def read_bytes(self, path: str) -> bytes:
         owner, repo, page_path = self._parse_target(path)
         with tempfile.TemporaryDirectory(prefix='lazyllm-github-wiki-') as root:
-            checkout = self._clone(owner, repo, root)
-            file_path = checkout / page_path
-            if not file_path.is_file():
-                raise GitHubFSError(
-                    'GITHUB_WIKI_NOT_FOUND', 'GitHub Wiki page does not exist.', status_code=404,
-                )
+            checkout = self._clone(owner, repo, root, materialize=False)
+            file_path = self._checkout_file(checkout, page_path)
             return file_path.read_bytes()
 
     def info(self, path: str, **kwargs: Any) -> dict[str, Any]:
