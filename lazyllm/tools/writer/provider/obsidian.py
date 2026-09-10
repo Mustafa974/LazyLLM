@@ -305,10 +305,15 @@ class ObsidianWriterProvider(WriterProviderBase):
             except (FileNotFoundError, ValueError) as exc:
                 return unsupported_image(raw, f'Obsidian image was kept without import: {exc}')
             writer_reference = self._writer_image_reference(note, source)
-            images[writer_reference] = {
-                'raw': raw,
-                'resource_uri': source.as_uri(),
-            }
+            image = images.setdefault(
+                writer_reference,
+                {
+                    'raw': raw,
+                    'resource_uri': source.as_uri(),
+                    'raw_variants': [],
+                },
+            )
+            image.setdefault('raw_variants', []).append(raw)
             return f'![{alt or source.stem}]({writer_reference})'
 
         def obsidian_image(match: re.Match[str]) -> str:
@@ -362,7 +367,9 @@ class ObsidianWriterProvider(WriterProviderBase):
         content = self._restore_images(content, bridge, note, fs, media_assets)
         content = _WRITER_SYSTEM_ANCHOR_LINE_RE.sub('', content)
         frontmatter = str(bridge.get('frontmatter') or '')
-        return frontmatter + content.strip() + '\n'
+        if not content.endswith('\n'):
+            content += '\n'
+        return frontmatter + content
 
     def _restore_images(
         self,
@@ -374,7 +381,10 @@ class ObsidianWriterProvider(WriterProviderBase):
     ) -> str:
         assets = list((media_assets.assets if media_assets else {}).values())
         images = {
-            str(uri): dict(item)
+            str(uri): {
+                **dict(item),
+                'raw_variants': list(item.get('raw_variants') or []),
+            }
             for uri, item in dict(bridge.get('images') or {}).items()
             if isinstance(item, dict)
         }
@@ -414,9 +424,17 @@ class ObsidianWriterProvider(WriterProviderBase):
         images: Dict[str, Dict[str, Any]],
         assets: list[Any],
     ) -> str | None:
+        def consume(item: Dict[str, Any]) -> str | None:
+            variants = item.get('raw_variants') or []
+            if variants:
+                raw = str(variants.pop(0) or '')
+            else:
+                raw = str(item.get('raw') or '')
+            return raw or None
+
         for candidate in (uri, unquote(uri)):
             item = images.get(candidate)
-            raw = str((item or {}).get('raw') or '')
+            raw = consume(item) if item else None
             if raw:
                 return raw
         for asset in assets:
@@ -428,7 +446,7 @@ class ObsidianWriterProvider(WriterProviderBase):
             item = images.get(source_reference)
             if not item:
                 continue
-            raw = str(item.get('raw') or '')
+            raw = consume(item)
             if raw:
                 return raw
         return None

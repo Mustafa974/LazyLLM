@@ -253,6 +253,8 @@ class ObsidianFS(LazyLLMFSBase):
             resolved.relative_to(vault.root)
         except ValueError:
             return None
+        if '.obsidian' in resolved.relative_to(vault.root).parts:
+            return None
         return resolved if resolved.is_file() else None
 
     @classmethod

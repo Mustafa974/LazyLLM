@@ -1,5 +1,7 @@
 from unittest.mock import MagicMock
 
+import pytest
+
 from lazyllm.tools.fs.supplier import obsidian as obsidian_fs
 from lazyllm.tools.fs.supplier.obsidian import ObsidianFS, ObsidianNote, ObsidianVault
 from lazyllm.tools.writer.data_models.multimodal import MediaAsset, MediaAssetLibrary
@@ -85,6 +87,18 @@ class TestObsidianVaultDiscovery:
         else:
             raise AssertionError('scan-root generic writes should be rejected')
         assert outside.read_text(encoding='utf-8') == 'original'
+
+    def test_resolve_image_reference_rejects_obsidian_internal_files(self, tmp_path):
+        root = tmp_path / 'vault'
+        _vault(root)
+        note = _note(root)
+        internal_image = root / '.obsidian' / 'plugins' / 'example' / 'icon.png'
+        internal_image.parent.mkdir(parents=True)
+        internal_image.write_bytes(b'internal')
+        fs = ObsidianFS(token=str(root))
+
+        with pytest.raises(FileNotFoundError):
+            fs.resolve_image_reference(note, '.obsidian/plugins/example/icon.png')
 
 
 class TestObsidianDisplayPath:
@@ -337,6 +351,29 @@ class TestObsidianWriterProvider:
         )
 
         assert restored == '![[diagram.png]]\n'
+
+    def test_duplicate_image_aliases_round_trip_in_source_order(self, tmp_path):
+        provider = ObsidianWriterProvider()
+        note = _note(tmp_path)
+        image = tmp_path / 'diagram.png'
+        image.write_bytes(b'diagram')
+        fs = MagicMock()
+        fs.resolve_image_reference.return_value = image
+        source = '![[diagram.png|原图]]\n![[diagram.png|放大图]]\n'
+
+        markdown, bridge = provider._to_writer_markdown(source, note, fs)
+        restored = provider._from_writer_markdown(markdown, bridge, note, fs, None)
+
+        assert restored == source
+
+    def test_restore_preserves_markdown_whitespace(self, tmp_path):
+        provider = ObsidianWriterProvider()
+        note = _note(tmp_path)
+        content = '  first line\nsecond line  \n\n'
+
+        restored = provider._from_writer_markdown(content, {}, note, MagicMock(), None)
+
+        assert restored == content
 
     def test_existing_external_image_keeps_its_url_on_write_back(self, tmp_path):
         provider = ObsidianWriterProvider()
