@@ -726,6 +726,8 @@ class GitHubWriterProvider(WriterProviderBase):
             'locator': str(result.get('uri') or target.uri or ''),
             'block_count': 1,
             'warnings': list(result.get('warnings') or []),
+            'persisted_document': content,
+            'representation': 'markdown',
         }
 
     @staticmethod
