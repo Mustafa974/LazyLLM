@@ -1,7 +1,11 @@
 from __future__ import annotations
+from contextvars import copy_context
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+import uuid
 
 from lazyllm import LOG
+from lazyllm.common import ThreadPoolExecutor
 from pydantic import TypeAdapter, ValidationError
 
 from .base import WriterToolBase
@@ -12,6 +16,7 @@ from ..data_models.task import InputResource, TargetDocument, WritingTask
 from ..data_models.writer_ir import WriterDocument, WriterStage
 from ..prompts.profile_resources import RESOURCE_PROFILE_PROMPT
 from ..provider import (
+    GitHubWriterProvider,
     WriterProviderWriteOutcomeError,
     get_writer_provider,
     is_ambiguous_write_error,
@@ -68,8 +73,7 @@ class WriterResourceTools(WriterToolBase):
         writing_task = self._unified_model(task, WritingTask)
         inputs = self._unified_models(input_resources, InputResource)
 
-        profiles: List[ResourceProfile] = []
-        for res in inputs:
+        def profile_resource(index: int, res: InputResource) -> ResourceProfile:
             content = self._read_resource_content(res)
 
             resource_role = res.meta.get('role', 'background')
@@ -106,8 +110,8 @@ class WriterResourceTools(WriterToolBase):
                 except Exception:
                     LOG.warning('profile_resources: LLM analysis failed, using rule-based fallback')
 
-            profiles.append(ResourceProfile(
-                resource_id=res.resource_id or f'res-{len(profiles)}',
+            return ResourceProfile(
+                resource_id=res.resource_id or f'res-{index}',
                 resource_role=resource_role,
                 template_usage=template_usage,
                 summary=summary,
@@ -117,7 +121,17 @@ class WriterResourceTools(WriterToolBase):
                 extracted_constraints=extracted_constraints,
                 extracted_outline=extracted_outline,
                 raw_content=content[:3000] if content else None,
-            ))
+            )
+
+        if self.llm is not None and len(inputs) > 1:
+            with ThreadPoolExecutor(max_workers=min(8, len(inputs))) as executor:
+                futures = [
+                    executor.submit(copy_context().run, profile_resource, index, res)
+                    for index, res in enumerate(inputs)
+                ]
+                profiles = [future.result() for future in futures]
+        else:
+            profiles = [profile_resource(index, res) for index, res in enumerate(inputs)]
 
         return self._save_artifacts(
             {'resource_profiles': profiles},
@@ -167,7 +181,12 @@ class WriterResourceTools(WriterToolBase):
             raise ValueError('target_document.meta.stage must be a valid WriterStage') from exc
         writer_provider = self._writer_provider(target)
         writer_provider.require_capability('load')
-        loaded = writer_provider.load_document(target, stage=stage)
+        load_options = {}
+        if isinstance(writer_provider, GitHubWriterProvider) and self.artifact_store:
+            load_options['resource_cache_dir'] = str(
+                Path(self.artifact_store) / 'github-resources' / uuid.uuid4().hex,
+            )
+        loaded = writer_provider.load_document(target, stage=stage, **load_options)
         representation = str(loaded.get('representation') or '').strip().lower()
         source = loaded.get('source_document')
         resolved_target = self._unified_model(

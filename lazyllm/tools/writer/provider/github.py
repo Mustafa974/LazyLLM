@@ -7,8 +7,11 @@ import os
 import posixpath
 import re
 from collections.abc import Callable, Mapping
+from contextvars import copy_context
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote, urlparse
+
+from lazyllm.common import ThreadPoolExecutor
 
 from ...fs.supplier.github import GitHubFSError, GitHubRepoFS, GitHubWikiFS
 from ..data_models.multimodal import MediaAssetLibrary
@@ -370,9 +373,9 @@ class GitHubWriterProvider(WriterProviderBase):
         )
 
     @staticmethod
-    def _fs(target_type: str):
+    def _fs(target_type: str, *, skip_instance_cache: bool = False):
         if target_type == 'repository':
-            return GitHubRepoFS(dynamic_auth=True)
+            return GitHubRepoFS(dynamic_auth=True, skip_instance_cache=skip_instance_cache)
         if target_type == 'wiki':
             return GitHubWikiFS(dynamic_auth=True)
         raise ValueError(f'Unsupported GitHub target type: {target_type!r}.')
@@ -417,6 +420,7 @@ class GitHubWriterProvider(WriterProviderBase):
         target: TargetDocument,
         *,
         stage: WriterStage = 'final',
+        resource_cache_dir: str = '',
     ) -> dict:
         del stage  # Markdown representation does not carry Writer IR stages.
         target_type = self._target_type(target)
@@ -426,7 +430,19 @@ class GitHubWriterProvider(WriterProviderBase):
             with fs.read_session(locator) as (resolved, read_bytes):
                 return self._load_resolved_document(target, resolved, read_bytes)
         resolved = fs.resolve_target(locator)
-        return self._load_resolved_document(target, resolved, fs.read_bytes)
+
+        def read_resource(uri: str) -> bytes:
+            resource_fs = self._fs(target_type, skip_instance_cache=True)
+            try:
+                return resource_fs.read_bytes(uri)
+            finally:
+                resource_fs.close()
+
+        return self._load_resolved_document(
+            target, resolved, fs.read_bytes,
+            read_resource_bytes=read_resource if resource_cache_dir else None,
+            resource_cache_dir=resource_cache_dir,
+        )
 
     def _convert_native_document(
         self,
@@ -457,6 +473,9 @@ class GitHubWriterProvider(WriterProviderBase):
         target: TargetDocument,
         resolved: Mapping[str, object],
         read_bytes: Callable[[str], bytes],
+        *,
+        read_resource_bytes: Callable[[str], bytes] | None = None,
+        resource_cache_dir: str = '',
     ) -> dict:
         resolved_target = self._merge_target(target, resolved)
         try:
@@ -467,7 +486,8 @@ class GitHubWriterProvider(WriterProviderBase):
                 'GitHub Writer documents must be UTF-8 Markdown.',
             ) from exc
         resources, warnings = self._collect_referenced_resources(
-            markdown, resolved_target, read_bytes,
+            markdown, resolved_target, read_resource_bytes or read_bytes,
+            resource_cache_dir=resource_cache_dir,
         )
         writer_markdown, image_layouts = _normalize_html_image_layouts(markdown)
         if image_layouts:
@@ -518,6 +538,8 @@ class GitHubWriterProvider(WriterProviderBase):
         markdown: str,
         target: TargetDocument,
         read_bytes: Callable[[str], bytes],
+        *,
+        resource_cache_dir: str = '',
     ) -> tuple[list[InputResource], list[str]]:
         candidates: list[str] = []
         candidates.extend(
@@ -529,23 +551,24 @@ class GitHubWriterProvider(WriterProviderBase):
             match.group('url').strip()
             for match in _HTML_IMAGE_RE.finditer(markdown)
         )
-        resources: list[InputResource] = []
-        warnings: list[str] = []
+        references: list[tuple[str, str]] = []
         seen: set[str] = set()
         for raw_url in candidates:
             uri = self._referenced_uri(raw_url, target)
             if not uri or uri in seen:
                 continue
             seen.add(uri)
+            references.append((raw_url, uri))
+        cache_root = Path(resource_cache_dir).expanduser().resolve() if resource_cache_dir else None
+
+        def collect_resource(raw_url: str, uri: str) -> tuple[InputResource | None, list[str]]:
             mime_type = mimetypes.guess_type(unquote(urlparse(uri).path))[0]
             try:
                 payload = read_bytes(uri)
             except Exception as exc:  # noqa: BLE001 - one resource failure becomes a warning.
                 code = getattr(exc, 'code', type(exc).__name__)
-                warnings.append(f'{raw_url}: {code}')
-                continue
-            resources.append(InputResource(
-                resource_id=f'github-resource-{len(resources)}',
+                return None, [f'{raw_url}: {code}']
+            resource = InputResource(
                 resource_type='image',
                 uri=uri,
                 mime_type=mime_type,
@@ -558,7 +581,36 @@ class GitHubWriterProvider(WriterProviderBase):
                     'source_reference': raw_url,
                     'size': len(payload),
                 },
-            ))
+            )
+            if cache_root is not None:
+                cache_path = cache_root / hashlib.sha256(uri.encode()).hexdigest()
+                try:
+                    cache_root.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_bytes(payload)
+                except OSError as exc:
+                    return resource, [f'{raw_url}: CACHE_WRITE_FAILED ({type(exc).__name__})']
+                resource.meta['github_resource_cache'] = {
+                    'uri': uri, 'path': str(cache_path),
+                    'sha256': hashlib.sha256(payload).hexdigest(),
+                }
+            return resource, []
+
+        if cache_root is not None and self._target_type(target) == 'repository' and len(references) > 1:
+            with ThreadPoolExecutor(max_workers=min(8, len(references))) as executor:
+                futures = [
+                    executor.submit(copy_context().run, collect_resource, raw_url, uri)
+                    for raw_url, uri in references
+                ]
+                results = [future.result() for future in futures]
+        else:
+            results = [collect_resource(raw_url, uri) for raw_url, uri in references]
+        resources: list[InputResource] = []
+        warnings: list[str] = []
+        for resource, resource_warnings in results:
+            warnings.extend(resource_warnings)
+            if resource is not None:
+                resource.resource_id = f'github-resource-{len(resources)}'
+                resources.append(resource)
         return resources, warnings
 
     def _referenced_uri(self, raw_url: str, target: TargetDocument) -> str:
