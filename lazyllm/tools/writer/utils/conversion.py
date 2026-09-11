@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Literal, Optional
 
 from lazyllm.thirdparty import mistune
@@ -19,17 +18,12 @@ from ..numbering import (
 )
 from .pandoc import markdown_to_latex
 from .artifact import deserialize_artifact_json, serialize_artifact_json
+from .markdown_inline import MarkdownInlineContent, parse_markdown_inline
+from .tables import table_grid
 
 
 WriterSourceFormat = Literal['markdown', 'lmd', 'writer_document']
 WriterTargetFormat = Literal['markdown', 'lmd', 'latex']
-
-
-@dataclass
-class _InlineContent:
-    content: str = ''
-    spans: List[WriterSpan] = field(default_factory=list)
-    references: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _normalize_document_id(value: str) -> str:
@@ -74,92 +68,8 @@ def _document_signature(document: WriterDocument) -> str:
     })
 
 
-def _append_span(result: _InlineContent, text: str, style: Dict[str, Any]) -> None:
-    if not text:
-        return
-    result.content += text
-    if result.spans and result.spans[-1].style == style:
-        result.spans[-1].text += text
-    else:
-        result.spans.append(WriterSpan(text=text, style=dict(style)))
-
-
-def _inline_content(  # noqa: C901
-    tokens: Optional[Iterable[Dict[str, Any]]],
-    style: Optional[Dict[str, Any]] = None,
-    result: Optional[_InlineContent] = None,
-) -> _InlineContent:
-    output = result or _InlineContent()
-    inherited = dict(style or {})
-    for token in tokens or []:
-        token_type = str(token.get('type') or '')
-        children = token.get('children') or []
-        if token_type in {'strong', 'emphasis', 'strikethrough'}:
-            child_style = dict(inherited)
-            child_style[{
-                'strong': 'bold',
-                'emphasis': 'italic',
-                'strikethrough': 'strikethrough',
-            }[token_type]] = True
-            _inline_content(children, child_style, output)
-            continue
-        if token_type == 'codespan':
-            _append_span(output, str(token.get('raw') or ''), {**inherited, 'inline_code': True})
-            continue
-        if token_type == 'link':
-            url = str((token.get('attrs') or {}).get('url') or '')
-            if url.startswith('#block-'):
-                _inline_content(children, {
-                    **inherited,
-                    'link': {
-                        'type': 'internal_ref',
-                        'target_node_id': url.removeprefix('#block-'),
-                    },
-                }, output)
-                continue
-            start = len(output.content)
-            _inline_content(children, inherited, output)
-            attrs = token.get('attrs') or {}
-            reference = {
-                'type': 'link', 'url': str(attrs.get('url') or ''),
-                'start': start, 'end': len(output.content),
-            }
-            if attrs.get('title'):
-                reference['title'] = str(attrs['title'])
-            output.references.append(reference)
-            continue
-        if token_type == 'image':
-            attrs = token.get('attrs') or {}
-            alt_content = _inline_content(children).content
-            start = len(output.content)
-            _append_span(output, alt_content, inherited)
-            reference = {
-                'type': 'markdown_image', 'url': str(attrs.get('url') or ''),
-                'alt': alt_content, 'start': start, 'end': len(output.content),
-            }
-            if attrs.get('title'):
-                reference['title'] = str(attrs['title'])
-            output.references.append(reference)
-            continue
-        if token_type in {'softbreak', 'linebreak'}:
-            _append_span(output, '\n', inherited)
-            if token_type == 'linebreak':
-                output.references.append({'type': 'hard_break', 'offset': len(output.content) - 1})
-            continue
-        if token_type in {'inline_html', 'html_inline'}:
-            raw = str(token.get('raw') or '')
-            start = len(output.content)
-            _append_span(output, raw, inherited)
-            output.references.append({
-                'type': 'html_inline', 'source': raw,
-                'start': start, 'end': len(output.content),
-            })
-            continue
-        if children:
-            _inline_content(children, inherited, output)
-            continue
-        _append_span(output, str(token.get('raw') or ''), inherited)
-    return output
+_InlineContent = MarkdownInlineContent
+_inline_content = parse_markdown_inline
 
 
 def _slice_inline(value: _InlineContent, start: int) -> _InlineContent:
@@ -261,29 +171,35 @@ class _MarkdownParser:
             **extras,
         )
 
-    @staticmethod
-    def table_markdown(token: Dict[str, Any]) -> str:
-        head: List[Dict[str, Any]] = []
-        rows: List[List[Dict[str, Any]]] = []
+    def table_block(self, token: Dict[str, Any]) -> WriterBlock:
+        table_node_id = self.next_id('table')
+        rows: List[tuple[bool, List[Dict[str, Any]]]] = []
         for child in token.get('children') or []:
             if child.get('type') == 'table_head':
-                head = list(child.get('children') or [])
+                rows.append((True, list(child.get('children') or [])))
             elif child.get('type') == 'table_body':
-                rows.extend(list(row.get('children') or []) for row in child.get('children') or [])
-        if not head:
-            return ''
-
-        def cell_text(cell: Dict[str, Any]) -> str:
-            return _inline_content(cell.get('children') or []).content.replace('|', '\\|').replace('\n', '<br>')
-
-        header = f'| {" | ".join(cell_text(cell) for cell in head)} |'
-        dividers = []
-        for cell in head:
-            align = str((cell.get('attrs') or {}).get('align') or '')
-            dividers.append({'left': ':---', 'right': '---:', 'center': ':---:'}.get(align, '---'))
-        lines = [header, f'| {" | ".join(dividers)} |']
-        lines.extend(f'| {" | ".join(cell_text(cell) for cell in row)} |' for row in rows)
-        return '\n'.join(lines)
+                rows.extend(
+                    (False, list(row.get('children') or []))
+                    for row in child.get('children') or []
+                )
+        return self.block('table', '', node_id=table_node_id, children=[
+            self.block('table_row', '', children=[
+                self.block(
+                    'table_cell',
+                    rich.content,
+                    spans=rich.spans,
+                    references=rich.references,
+                    numbering={
+                        'header': header,
+                        **({'align': align} if align else {}),
+                    },
+                )
+                for cell in cells
+                for rich in [_inline_content(cell.get('children') or [])]
+                for align in [str((cell.get('attrs') or {}).get('align') or '')]
+            ])
+            for header, cells in rows
+        ])
 
     def parse_sequence(self, tokens: Iterable[Dict[str, Any]]) -> List[WriterBlock]:  # noqa: C901
         blocks: List[WriterBlock] = []
@@ -412,7 +328,7 @@ class _MarkdownParser:
                 self.emitted = True
                 continue
             if token_type == 'table':
-                blocks.append(self.block('table', self.table_markdown(token), editable=False))
+                blocks.append(self.table_block(token))
                 self.emitted = True
                 continue
             if token_type == 'thematic_break':
@@ -711,6 +627,25 @@ def _render_block(block: WriterBlock, depth: int, allow_raw: bool) -> str:
             code = f'{fence}{info}\n{block.content}\n{fence}'
         caption = str(block.provider_payload.get('numbering_caption') or '').strip()
         current = '\n'.join(filter(None, [caption, code]))
+    elif block.type == 'table':
+        grid = table_grid(block)
+        cells = [
+            [
+                _render_inline(cell).replace('|', '\\|').replace('\n', '<br>')
+                if cell is not None else ''
+                for cell in row
+            ]
+            for row in grid
+        ]
+        dividers = [
+            {'left': ':---', 'right': '---:', 'center': ':---:'}.get(
+                str(cell.numbering.get('align') or ''), '---',
+            ) if cell is not None else '---'
+            for cell in grid[0]
+        ]
+        lines = [f'| {" | ".join(cells[0])} |', f'| {" | ".join(dividers)} |']
+        lines.extend(f'| {" | ".join(row)} |' for row in cells[1:])
+        current = '\n\n'.join(filter(None, [block.content.strip(), '\n'.join(lines)]))
     elif block.type == 'divider':
         current = block.content.strip() if re.fullmatch(r'(?:[-*_]\s*){3,}', block.content.strip()) else '---'
     elif block.type == 'image':
@@ -718,7 +653,9 @@ def _render_block(block: WriterBlock, depth: int, allow_raw: bool) -> str:
     else:
         current = block.content
     current = '\n'.join(filter(None, [anchor, current]))
-    children = _render_block_sequence(block.children, depth, allow_raw)
+    children = '' if block.type == 'table' else _render_block_sequence(
+        block.children, depth, allow_raw,
+    )
     return '\n\n'.join(filter(None, [current, children]))
 
 

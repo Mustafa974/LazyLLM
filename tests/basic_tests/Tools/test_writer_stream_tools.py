@@ -227,6 +227,33 @@ def test_ir_json_parser_buffers_non_streamable_parent_and_its_children():
     assert final_delta == []
 
 
+def test_ir_json_parser_emits_a_structured_table_once_after_its_grid_is_complete():
+    table = WriterBlock(node_id='table', type='table', children=[
+        WriterBlock(node_id='row-1', type='table_row', children=[
+            WriterBlock(node_id='cell-1', type='table_cell', content='Metric'),
+            WriterBlock(node_id='cell-2', type='table_cell', content='Value'),
+        ]),
+        WriterBlock(node_id='row-2', type='table_row', children=[
+            WriterBlock(node_id='cell-3', type='table_cell', content='DAU'),
+            WriterBlock(node_id='cell-4', type='table_cell', content='100'),
+        ]),
+    ])
+    block = _section_block(table)
+    raw = block.model_dump_json(exclude_defaults=True)
+    table_raw = table.model_dump_json(exclude_defaults=True)
+    table_end = raw.index(table_raw) + len(table_raw)
+    parser = IRJSONMarkdownParser(_instruction())
+
+    assert parser.feed(raw[:table_end - 1]) == []
+    streamed = ''.join(parser.feed(raw[table_end - 1:]))
+    final = ''.join(parser.finish(block))
+
+    expected = render_document_markdown(WriterDocument(document_id='doc', blocks=[table])).strip()
+    assert streamed.count('| DAU | 100 |') == 1
+    assert expected in streamed
+    assert final == ''
+
+
 @pytest.mark.parametrize('invalid_json', [
     '{"content":"\\x"}',
     '{"content":"\\uD83D"}',

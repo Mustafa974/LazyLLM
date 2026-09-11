@@ -80,7 +80,10 @@ def _image_library(tmp_path, need_id='instr-image'):
 
 def test_revision_candidates_include_read_only_table_structure():
     row = WriterBlock(
-        node_id='row', type='table_row', content='A1 | B1', editable=False,
+        node_id='row', type='table_row', editable=False, children=[
+            WriterBlock(node_id='cell-a', type='table_cell', content='A1'),
+            WriterBlock(node_id='cell-b', type='table_cell', content='B1'),
+        ],
     )
     table = WriterBlock(
         node_id='table', type='table', children=[row], editable=False,
@@ -90,8 +93,52 @@ def test_revision_candidates_include_read_only_table_structure():
     ))
 
     assert [(item['type'], item['content']) for item in candidates] == [
-        ('table', ''), ('table_row', 'A1 | B1'),
+        ('table', ''), ('table_row', ''), ('table_cell', 'A1'), ('table_cell', 'B1'),
     ]
+
+
+def test_table_structure_patch_validates_after_the_complete_patch_set():
+    table = WriterBlock(node_id='table', type='table', children=[
+        WriterBlock(node_id='row-1', type='table_row', children=[
+            WriterBlock(node_id='a', type='table_cell', content='A'),
+        ]),
+        WriterBlock(node_id='row-2', type='table_row', children=[
+            WriterBlock(node_id='b', type='table_cell', content='B'),
+        ]),
+    ])
+    document = WriterDocument(document_id='doc-1', blocks=[table])
+    patch = PatchSet(target_doc_id='doc-1', hunks=[
+        PatchHunk(
+            target_node_id='new-1', modify_type='create', parent_node_id='row-1', index=1,
+            block=WriterBlock(node_id='new-1', type='table_cell', content='1'),
+        ),
+        PatchHunk(
+            target_node_id='new-2', modify_type='create', parent_node_id='row-2', index=1,
+            block=WriterBlock(node_id='new-2', type='table_cell', content='2'),
+        ),
+    ])
+
+    revised, _ = apply_patch_to_ir(document, patch)
+
+    assert [[cell.node_id for cell in row.children] for row in revised.blocks[0].children] == [
+        ['a', 'new-1'], ['b', 'new-2'],
+    ]
+
+
+def test_generated_revision_builds_a_table_subtree_with_unique_ids():
+    content = RevisionBlockContent(type='table', children=[
+        RevisionBlockContent(type='table_row', children=[
+            RevisionBlockContent(type='table_cell', content='A'),
+            RevisionBlockContent(type='table_cell', content='B'),
+        ]),
+    ])
+
+    table = WriterRevisionTools()._new_block('draft', content)
+    ids = [block.node_id for block in table.iter_blocks()]
+
+    assert [child.type for child in table.children] == ['table_row']
+    assert [cell.content for cell in table.children[0].children] == ['A', 'B']
+    assert len(ids) == len(set(ids))
 
 
 def test_apply_patch_supports_all_block_operations():

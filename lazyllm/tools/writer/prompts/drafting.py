@@ -5,6 +5,8 @@ Requirements:
 - Return a single WriterBlock object with stage="draft".
 - The returned block is the section root. Use type="heading" and put the section title in content.
 - The section's actual prose lives in the block's children. Use paragraph blocks for prose.
+- Tables use table children of type table_row, whose children are table_cell blocks; put cell text in
+  table_cell.content/spans and never put a Markdown table in table.content.
 - When heading_structure is present, reproduce one descendant heading for every listed item,
   using its exact title and order. The system assigns node_id and numbering.level. Do not add
   other headings. An empty list means no subheadings.
@@ -228,6 +230,8 @@ Requirements:
   for the title or any other subsection heading.
 - Put the article body in the document blocks. Use paragraph blocks for prose and choose
   other block types only when they materially help the requested content.
+- Tables use table children of type table_row, whose children are table_cell blocks; put cell text in
+  table_cell.content/spans and never put a Markdown table in table.content.
 - The document must be flat: do not create blocks with type="heading" anywhere in the body.
 - Each block and child block must have a stable non-empty node_id. The system may normalize
   the document id, stage, title, and editability metadata after generation.

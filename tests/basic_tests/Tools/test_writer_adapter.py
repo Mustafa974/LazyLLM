@@ -11,7 +11,7 @@ from lazyllm.tools.writer.data_models import (
     WriterSpan,
 )
 from lazyllm.tools.writer.tools import WriterResourceTools
-from lazyllm.tools.writer.utils import load_artifact_json
+from lazyllm.tools.writer.utils import load_artifact_json, parse_document_markdown
 from lazyllm.tools.writer.utils.feishu_docx import prepare_docx_clone_descendants
 from lazyllm.tools.writer.provider.obsidian import ObsidianWriterProvider
 
@@ -36,6 +36,54 @@ def _move_blocks():
         _block('heading-2', '章节二', children=['paragraph-2'], heading=True),
         _block('paragraph-2', '段落二', parent='heading-2'),
     ]
+
+
+def test_feishu_tables_use_structured_ir_and_convert_back_to_grid():
+    blocks = [{
+        'block_id': 'table-1', 'block_type': 31, 'parent_id': 'doc-1',
+        'table': {'property': {'row_size': 2, 'column_size': 2}},
+        'children': ['cell-1', 'cell-2', 'cell-3', 'cell-4'],
+    }]
+    values = ['指标', '数量', 'DAU', '100']
+    for index, value in enumerate(values, start=1):
+        blocks.extend([
+            {
+                'block_id': f'cell-{index}', 'block_type': 32,
+                'parent_id': 'table-1', 'table_cell': {},
+                'children': [f'text-{index}'],
+            },
+            _block(f'text-{index}', value, parent=f'cell-{index}'),
+        ])
+
+    adapter = FeishuWriterAdapter()
+    document = adapter.blocks_to_ir(blocks, external_document_id='doc-1')
+    table = document.blocks[0]
+
+    assert [row.type for row in table.children] == ['table_row', 'table_row']
+    assert [[cell.content for cell in row.children] for row in table.children] == [
+        ['指标', '数量'], ['DAU', '100'],
+    ]
+
+    native = adapter.ir_to_blocks(document)
+    assert len(native) == 1
+    assert native[0]['table']['property'] == {'row_size': 2, 'column_size': 2}
+    assert native[0]['_table_cells'][1][1][0]['text_run']['content'] == '100'
+
+    current = table.children[1].children[1]
+    updated = current.model_copy(update={
+        'content': '200', 'spans': [WriterSpan(text='200', style={'bold': True})],
+    })
+    operation = adapter.patch_to_operation(PatchHunk(
+        target_node_id=current.node_id,
+        modify_type='update',
+        block=updated,
+    ), document)
+    assert operation.params['requests'] == [{
+        'block_id': 'text-4',
+        'update_text_elements': {'elements': [{
+            'text_run': {'content': '200', 'text_element_style': {'bold': True}},
+        }]},
+    }]
 
 
 def test_create_and_delete_build_native_operations():
@@ -206,6 +254,19 @@ def test_obsidian_ir_write_back_serializes_media_asset_path():
 
     assert '](/tmp/architecture.png)' in markdown
     assert document.blocks[0].references == [{'type': 'media_asset', 'id': 'asset-1'}]
+
+
+def test_obsidian_write_back_uses_the_structured_table_markdown_path():
+    document = parse_document_markdown(
+        '| Metric | Value |\n| --- | ---: |\n| DAU | 100 |',
+        'document',
+    )
+
+    markdown = ObsidianWriterProvider()._serialize_writer_document(document, None)
+
+    assert markdown.count('| DAU | 100 |') == 1
+    assert document.blocks[0].type == 'table'
+    assert document.blocks[0].content == ''
 
 
 def test_write_result_preserves_provider_fields(tmp_path):

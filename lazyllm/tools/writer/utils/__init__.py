@@ -35,6 +35,7 @@ from .conversion import (
 )
 from .request_constraints import parse_writer_request_constraints
 from .editing import set_document_editable
+from .tables import table_grid, validate_table, validate_writer_tables
 
 __all__ = [
     'SCHEMA_VERSION',
@@ -68,4 +69,7 @@ __all__ = [
     'strip_caption_numbering',
     'parse_writer_request_constraints',
     'set_document_editable',
+    'table_grid',
+    'validate_table',
+    'validate_writer_tables',
 ]

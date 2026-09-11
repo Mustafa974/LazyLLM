@@ -34,6 +34,15 @@ def _patch_wechat_client(monkeypatch, client):
     )
 
 
+def _table_block() -> WriterBlock:
+    table = parse_document_markdown(
+        '| 项目 | 值 |\n| --- | --- |\n| 中文 | 正常 |',
+        'table-document',
+    ).blocks[0]
+    table.node_id = 'table'
+    return table
+
+
 def test_wechat_provider_matches_and_resolves_prompt(monkeypatch):
     request = '请修改微信公众号草稿箱中的《目标文章》'
     monkeypatch.setattr(
@@ -83,10 +92,7 @@ def test_wechat_templates_render_distinct_html_and_validate_ids():
                     ),
                 ],
             ),
-            WriterBlock(
-                node_id='table', type='table',
-                content='| 项目 | 值 |\n| --- | --- |\n| 中文 | 正常 |',
-            ),
+            _table_block(),
         ],
     )
     adapter = WeChatWriterAdapter()
@@ -234,10 +240,7 @@ def test_wechat_draft_create_then_update(monkeypatch, tmp_path: Path):
             spans=[WriterSpan(text='粗体', style={'bold': True}), WriterSpan(text='和链接')],
             references=[{'type': 'link', 'url': 'https://example.com', 'start': 3, 'end': 5}],
         ),
-        WriterBlock(
-            node_id='table', type='table',
-            content='| 项目 | 值 |\n| --- | --- |\n| 中文 | 正常 |',
-        ),
+        _table_block(),
         WriterBlock(node_id='unsafe', type='paragraph', content='<script>'),
         WriterBlock(
             node_id='image', type='image', content='配图',
@@ -402,10 +405,20 @@ def test_wechat_draft_read_patch_write_preserves_untouched_html(monkeypatch):
     assert [block.type for block in document.blocks] == [
         'paragraph', 'wechat_opaque', 'image', 'table', 'paragraph',
     ]
+    table = document.blocks[3]
+    assert [row.type for row in table.children] == [
+        'table_row', 'table_row', 'table_row',
+    ]
+    assert [[cell.content for cell in row.children] for row in table.children] == [
+        ['A', 'B'], ['1', '2'], ['3'],
+    ]
+    assert table.children[1].children[0].numbering['row_span'] == 2
 
     adapter = WeChatWriterAdapter()
     assert adapter.document_to_html(document) == source_html
-    assert adapter.document_to_html(document, template='clean') != source_html
+    clean_html = adapter.document_to_html(document, template='clean')
+    assert clean_html != source_html
+    assert 'rowspan="2"' in clean_html
 
     target_block = document.blocks[-1].model_copy(deep=True)
     target_block.content = '修改后的正文'

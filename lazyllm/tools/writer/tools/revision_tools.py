@@ -46,6 +46,7 @@ from ..utils import (
     parse_markdown_sections,
     to_prompt_json,
     validate_markdown_paragraph,
+    validate_writer_tables,
 )
 
 
@@ -56,6 +57,7 @@ def apply_patch_to_ir(
 ) -> Tuple[WriterDocument, PatchResult]:
     '''Apply a provider-neutral patch without artifact or context dependencies.'''
     tools = WriterRevisionTools()
+    validate_writer_tables(document)
     tools._validate_patch(document, patch_set, media_assets=media_assets)
     if not patch_set.hunks \
             and (patch_set.new_title is None or patch_set.new_title == document.title):
@@ -70,6 +72,7 @@ def apply_patch_to_ir(
         tools._apply_patch_hunk(revised_doc, hunk)
         applied.append(hunk.hunk_id or hunk.target_node_id)
 
+    validate_writer_tables(revised_doc)
     revised_doc = WriterDocument.model_validate(revised_doc.model_dump())
     result = PatchResult(
         patch_id=patch_set.patch_id,
@@ -645,7 +648,7 @@ locator kind per reference. Return valid JSON only.
         return WriterBlock(
             node_id=f'writer-new-{uuid4()}',
             type=content.type,
-            content=content.content,
+            content=content.content or '',
             spans=deepcopy(content.spans or []),
             children=[
                 self._new_block(stage, child) for child in content.children

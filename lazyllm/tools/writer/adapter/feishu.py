@@ -6,7 +6,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlparse
 
 from ..utils.feishu_docx import DOCX_BLOCK_TYPE_FIELDS, prepare_docx_descendants
-from ..utils import strip_caption_numbering, strip_heading_numbering
+from ..utils import (
+    strip_caption_numbering, strip_heading_numbering, table_grid, validate_writer_tables,
+)
 from ..data_models.revision import PatchHunk
 from ..data_models.multimodal import MediaAssetLibrary
 from ..data_models.writer_ir import (
@@ -62,7 +64,7 @@ class FeishuWriterAdapter(WriterAdapterBase):
 
     provider = 'feishu'
 
-    def blocks_to_ir(
+    def blocks_to_ir(  # noqa: C901
         self,
         blocks: List[NativeBlock],
         *,
@@ -112,6 +114,38 @@ class FeishuWriterAdapter(WriterAdapterBase):
             if parent_id not in page_ids:
                 writer_by_id[parent_id].children = visible_children(children)
 
+        for table in writer_by_id.values():
+            if table.type != 'table':
+                continue
+            native_cells = [cell for cell in table.children if cell.type == 'table_cell']
+            columns = int(
+                (((table.provider_payload.get('raw_block') or {}).get('table') or {})
+                 .get('property') or {}).get('column_size') or len(native_cells) or 1
+            )
+            rows: List[WriterBlock] = []
+            for offset in range(0, len(native_cells), columns):
+                cells = native_cells[offset:offset + columns]
+                for cell in cells:
+                    cell.provider_payload['table_content_blocks'] = [
+                        deepcopy(child.provider_payload.get('raw_block') or {})
+                        for child in cell.children
+                    ]
+                    content = '\n'.join(child.content for child in cell.children)
+                    spans: List[WriterSpan] = []
+                    for index, child in enumerate(cell.children):
+                        if index:
+                            spans.append(WriterSpan(text='\n'))
+                        spans.extend(deepcopy(child.spans) or [WriterSpan(text=child.content)])
+                    cell.content = content
+                    cell.spans = spans
+                    cell.children = []
+                    cell.editable = True
+                rows.append(WriterBlock(
+                    node_id=f'{table.node_id}-row-{len(rows) + 1}',
+                    type='table_row', children=cells, stage=stage,
+                ))
+            table.children = rows
+
         nested_ids = {child_id for children in child_ids.values() for child_id in children}
         root_ids = [block_id for block_id in source_order if block_id not in nested_ids]
         # A Feishu Page block is the provider's document container. WriterDocument
@@ -135,7 +169,7 @@ class FeishuWriterAdapter(WriterAdapterBase):
         if revision is not None:
             binding['revision'] = revision
 
-        return WriterDocument(
+        document = WriterDocument(
             document_id=self.make_document_id(external_document_id),
             stage=stage,
             title=resolved_title,
@@ -145,6 +179,8 @@ class FeishuWriterAdapter(WriterAdapterBase):
             provider_binding=binding,
             ui_editable=False,
         )
+        validate_writer_tables(document)
+        return document
 
     @staticmethod
     def _restore_internal_references(writer_by_id: Dict[str, WriterBlock]) -> None:
@@ -182,7 +218,9 @@ class FeishuWriterAdapter(WriterAdapterBase):
             source_order.append(block_id)
         return raw_by_id, source_order
 
-    def ir_to_blocks(self, document: WriterDocument, media_assets: Any = None) -> List[NativeBlock]:
+    def ir_to_blocks(  # noqa: C901
+        self, document: WriterDocument, media_assets: Any = None,
+    ) -> List[NativeBlock]:
         if not isinstance(document, WriterDocument):
             raise TypeError(
                 f'document must be a WriterDocument, got {type(document).__name__}.')
@@ -190,6 +228,7 @@ class FeishuWriterAdapter(WriterAdapterBase):
         if provider and str(provider).lower() != self.provider:
             raise ValueError(
                 f'document provider must be {self.provider!r}, got {provider!r}.')
+        validate_writer_tables(document)
         media_library = None if media_assets is None else MediaAssetLibrary.model_validate(media_assets)
 
         flat_blocks: List[Tuple[WriterBlock, Optional[WriterBlock]]] = []
@@ -197,7 +236,8 @@ class FeishuWriterAdapter(WriterAdapterBase):
         def walk(items: List[WriterBlock], parent: Optional[WriterBlock] = None) -> None:
             for block in items:
                 flat_blocks.append((block, parent))
-                walk(block.children, block)
+                if block.type != 'table':
+                    walk(block.children, block)
 
         walk(document.blocks)
 
@@ -400,6 +440,32 @@ class FeishuWriterAdapter(WriterAdapterBase):
             raise ValueError(f'patch target node does not exist: {patch.target_node_id!r}.')
         if patch.block is None:
             raise ValueError('update patch must provide block.')
+        if block.type == 'table_cell':
+            if patch.block.type != 'table_cell' or patch.block.children:
+                raise ValueError('Feishu table cell updates must keep the table_cell structure.')
+            content_blocks = block.provider_payload.get('table_content_blocks') or []
+            text_blocks = [
+                raw for raw in content_blocks
+                if isinstance(raw, dict) and raw.get('block_type') in _TEXT_BLOCK_TYPES
+                and isinstance(raw.get('block_id'), str) and raw['block_id']
+            ]
+            if not text_blocks:
+                raise ValueError('Feishu table cell is missing its writable text block binding.')
+            desired = block.model_copy(deep=True)
+            for field in WRITER_BLOCK_MUTABLE_FIELDS:
+                setattr(desired, field, deepcopy(getattr(patch.block, field)))
+            return NativePatchOperation(
+                operation='update',
+                params={'requests': [
+                    {
+                        'block_id': raw['block_id'],
+                        'update_text_elements': {
+                            'elements': self._spans_to_elements(desired) if index == 0 else [],
+                        },
+                    }
+                    for index, raw in enumerate(text_blocks)
+                ]},
+            )
         block_id = self._require_feishu_binding(block, 'update target')
         raw_block = self._raw_payload(block)
         original_type = raw_block.get('block_type')
@@ -681,6 +747,33 @@ class FeishuWriterAdapter(WriterAdapterBase):
         original_type = original.get('block_type')
         block_type = self._block_type_from_ir(block, original_type)
 
+        if block.type == 'table':
+            grid = table_grid(block)
+            columns = len(grid[0])
+            raw['block_type'] = 31
+            table_payload = deepcopy(raw.get('table') or {})
+            table_payload.pop('cells', None)
+            table_payload.pop('merge_info', None)
+            table_property = deepcopy(table_payload.get('property') or {})
+            table_property.pop('merge_info', None)
+            raw['table'] = {
+                **table_payload,
+                'property': {
+                    **table_property,
+                    'row_size': len(grid),
+                    'column_size': columns,
+                },
+            }
+            raw['_table_cells'] = [
+                [
+                    self._spans_to_elements(cell, internal_ref_resolver)
+                    if cell is not None and cell.content else None
+                    for cell in row
+                ]
+                for row in grid
+            ]
+            return raw
+
         if not block.editable and original:
             original_content, original_spans = self._content_and_spans(original)
             if (
@@ -776,9 +869,6 @@ class FeishuWriterAdapter(WriterAdapterBase):
             if not isinstance(ordered, bool):
                 raise ValueError('list_item blocks require boolean numbering.ordered.')
             return 13 if ordered else 12
-        if block.type == 'table' and not block.provider_payload:
-            # Caption-only tables degrade to text.
-            return 2
         mapped = _IR_BLOCK_TYPES.get(block.type)
         if mapped is not None:
             return mapped

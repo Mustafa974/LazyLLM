@@ -7,8 +7,6 @@ from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import urlsplit
 
-from lazyllm.thirdparty import mistune
-
 from ..data_models.revision import PatchHunk
 from ..data_models.writer_ir import WriterBlock, WriterDocument, WriterSpan, WriterStage
 from ..numbering import (
@@ -18,10 +16,9 @@ from ..numbering import (
     format_target_number,
 )
 from ..templates.wechat import WeChatTemplate, get_wechat_template
-from ..utils import strip_heading_numbering
+from ..utils import strip_heading_numbering, validate_writer_tables
 from .base import NativeBlock, NativePatchOperation, WriterAdapterBase
 
-_TABLE_MARKDOWN = mistune.create_markdown(escape=True, plugins=['table'])
 _VOID_TAGS = {
     'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link',
     'meta', 'param', 'source', 'track', 'wbr',
@@ -485,6 +482,7 @@ class WeChatWriterAdapter(WriterAdapterBase):
             provider_binding=binding,
             ui_editable=False,
         )
+        validate_writer_tables(document)
         document.metadata['wechat_html_snapshot'] = _document_snapshot(document)
         return document
 
@@ -607,10 +605,42 @@ class WeChatWriterAdapter(WriterAdapterBase):
                 **({'language': language} if language else {}),
             )
         elif semantic == 'table':
+            rows: list[WriterBlock] = []
+            for row_index, row_node in enumerate(_descendants(payload_node, 'tr')):
+                cells: list[WriterBlock] = []
+                for cell_index, cell_node in enumerate(
+                    cell for cell in row_node.children if cell.tag in {'th', 'td'}
+                ):
+                    content, spans, references = _inline_content(cell_node)
+                    numbering: dict[str, Any] = {'header': cell_node.tag == 'th'}
+                    for html_name, ir_name in (('rowspan', 'row_span'), ('colspan', 'column_span')):
+                        if cell_node.attrs.get(html_name):
+                            try:
+                                numbering[ir_name] = int(cell_node.attrs[html_name])
+                            except ValueError as exc:
+                                raise ValueError(
+                                    f'WeChat table cell has invalid {html_name}.') from exc
+                    cells.append(WriterBlock(
+                        node_id=self.make_node_id(
+                            external_document_id,
+                            f'html-{"-".join(map(str, path))}-row-{row_index}-cell-{cell_index}',
+                        ),
+                        type='table_cell', content=content, spans=spans,
+                        references=references, stage=stage,
+                        numbering=numbering,
+                    ))
+                if cells:
+                    rows.append(WriterBlock(
+                        node_id=self.make_node_id(
+                            external_document_id,
+                            f'html-{"-".join(map(str, path))}-row-{row_index}',
+                        ),
+                        type='table_row', children=cells, stage=stage,
+                    ))
             block = WriterBlock(
                 node_id=node_id,
                 type='table',
-                content=self._table_to_markdown(payload_node),
+                children=rows,
                 stage=stage,
                 editable=True,
             )
@@ -710,21 +740,6 @@ class WeChatWriterAdapter(WriterAdapterBase):
             return 'p', node
         return '', node
 
-    @staticmethod
-    def _table_to_markdown(node: _HtmlNode) -> str:
-        rows: list[list[str]] = []
-        for row in _descendants(node, 'tr'):
-            cells = [cell for cell in row.children if cell.tag in {'th', 'td'}]
-            if cells:
-                rows.append([_node_text(cell).replace('|', '\\|').replace('\n', '<br>') for cell in cells])
-        if not rows:
-            return ''
-        width = max(len(row) for row in rows)
-        rows = [row + [''] * (width - len(row)) for row in rows]
-        output = [f"| {' | '.join(rows[0])} |", f"| {' | '.join(['---'] * width)} |"]
-        output.extend(f"| {' | '.join(row)} |" for row in rows[1:])
-        return '\n'.join(output)
-
     def ir_to_blocks(
         self,
         document: WriterDocument,
@@ -747,6 +762,7 @@ class WeChatWriterAdapter(WriterAdapterBase):
         template: str | None = None,
     ) -> str:
         '''Render Writer IR as WeChat draft HTML using a named template.'''
+        validate_writer_tables(document)
         selected_template = get_wechat_template(template)
         preserve_source = not str(template or '').strip()
         source = document.metadata.get('wechat_html_source')
@@ -853,7 +869,7 @@ class WeChatWriterAdapter(WriterAdapterBase):
                 preserve_source,
             )
         body = self._render_inline(block)
-        children = ''.join(self._render_sequence(
+        children = '' if block.type == 'table' else ''.join(self._render_sequence(
             block.children, images, numbering, heading_styles, caption_style, template,
             preserve_source,
         ))
@@ -942,7 +958,10 @@ class WeChatWriterAdapter(WriterAdapterBase):
                 f'{image_tag}{caption}</{wrapper_tag}>{children}'
             )
         if block.type == 'table':
-            return f'{self._render_table(block.content)}{children}'
+            caption_text = f'{escape(label)} {body}'.strip() if block.content.strip() else ''
+            caption_attr = f' style="{escape(caption_style, quote=True)}"' if caption_style else ''
+            caption = f'<p{caption_attr}>{caption_text}</p>' if caption_text else ''
+            return f'{caption}{self._render_table(block)}'
         if block.type in {'quote', 'callout'}:
             style = _style_text(template.quote_style())
             style_attr = f' style="{escape(style, quote=True)}"' if style else ''
@@ -1009,23 +1028,31 @@ class WeChatWriterAdapter(WriterAdapterBase):
             )
         return f'<section{list_attr}>{"".join(rendered)}</section>'
 
-    @staticmethod
-    def _render_table(markdown: str) -> str:
-        html = _TABLE_MARKDOWN(markdown).strip()
-        if '<table>' not in html:
-            raise ValueError('WeChat table block must contain a valid Markdown table.')
+    def _render_table(self, block: WriterBlock) -> str:
         table_style = _style_text(_WECHAT_TABLE_STYLE)
         header_style = _style_text(_WECHAT_TABLE_HEADER_STYLE)
         cell_style = _style_text(_WECHAT_TABLE_CELL_STYLE)
-        html = html.replace(
-            '<table>',
-            f'<table style="{table_style}">',
-        )
-        html = html.replace('<th style="', f'<th style="{header_style};')
-        html = html.replace('<th>', f'<th style="{header_style}">')
-        html = html.replace('<td style="', f'<td style="{cell_style};')
-        html = html.replace('<td>', f'<td style="{cell_style}">')
-        return html.replace('&lt;br&gt;', '<br />')
+        rows = []
+        for row in block.children:
+            if row.type != 'table_row':
+                continue
+            cells = []
+            for cell in row.children:
+                if cell.type != 'table_cell':
+                    continue
+                tag = 'th' if cell.numbering.get('header') else 'td'
+                style = header_style if tag == 'th' else cell_style
+                spans = ''.join(
+                    f' {html_name}="{cell.numbering[ir_name]}"'
+                    for html_name, ir_name in (('rowspan', 'row_span'), ('colspan', 'column_span'))
+                    if cell.numbering.get(ir_name, 1) != 1
+                )
+                cells.append(
+                    f'<{tag}{spans} style="{escape(style, quote=True)}">'
+                    f'{self._render_inline(cell)}</{tag}>'
+                )
+            rows.append(f'<tr>{"".join(cells)}</tr>')
+        return f'<table style="{escape(table_style, quote=True)}">{"".join(rows)}</table>'
 
     @staticmethod
     def _safe_link(value: Any) -> str:

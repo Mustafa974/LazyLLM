@@ -1,6 +1,6 @@
 import pytest
 
-from lazyllm.tools.writer.data_models import TargetDocument, WriterBlock, WriterDocument
+from lazyllm.tools.writer.data_models import TargetDocument, WriterBlock, WriterDocument, WriterSpan
 from lazyllm.tools.writer.provider import (
     FeishuWriterProvider, GitHubWriterProvider, NotionWriterProvider,
     WeChatWriterProvider, WriterProviderBase,
@@ -87,6 +87,45 @@ def test_ir_math_is_not_escaped_as_ordinary_markdown_text():
     result = WriterProviderBase.convert_common_document(document, output_format='latex')
     assert r'\(x_1 + \alpha\)' in result.content
     assert r'50\%' in result.content
+
+
+def test_structured_table_exports_each_cell_once_with_rich_text_and_math(monkeypatch):
+    document = WriterDocument(document_id='doc', blocks=[WriterBlock(
+        node_id='table', type='table', children=[
+            WriterBlock(node_id='row-1', type='table_row', children=[
+                WriterBlock(
+                    node_id='cell-1', type='table_cell', content='Metric',
+                    numbering={'header': True},
+                ),
+                WriterBlock(
+                    node_id='cell-2', type='table_cell', content='Value',
+                    numbering={'header': True},
+                ),
+            ]),
+            WriterBlock(node_id='row-2', type='table_row', children=[
+                WriterBlock(
+                    node_id='cell-3', type='table_cell', content='DAU',
+                    spans=[WriterSpan(text='DAU', style={'bold': True})],
+                ),
+                WriterBlock(node_id='cell-4', type='table_cell', content=r'$x_1$'),
+            ]),
+        ],
+    )])
+
+    markdown = writer_export.export_writer_document(document, 'markdown')
+    plain = writer_export.export_writer_document(document, 'text')
+    captured = []
+    monkeypatch.setattr(
+        writer_export,
+        'convert_writer_content',
+        lambda source, source_format, target_format: captured.append(source) or 'latex',
+    )
+    latex = writer_export.export_writer_document(document, 'latex')
+
+    assert markdown.count('DAU') == 1 and '**DAU**' in markdown
+    assert markdown.count('$x_1$') == 1
+    assert plain.count('DAU') == 1 and plain.count('x_1') == 1
+    assert latex == 'latex' and captured[0].count('DAU') == 1
 
 
 def test_legacy_provider_subclass_can_still_override_convert_document():

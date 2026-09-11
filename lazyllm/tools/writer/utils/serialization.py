@@ -22,6 +22,7 @@ from ..numbering import (
     parse_markdown_heading_numbering_config,
     strip_markdown_heading_numbering_config,
 )
+from .markdown_inline import parse_markdown_inline
 
 
 class MarkdownSelectionError(ValueError):
@@ -425,6 +426,40 @@ def parse_document_markdown(  # noqa: C901
                     ))
             continue
 
+        if token_type == 'table':
+            rows: List[WriterBlock] = []
+            for section in token.get('children') or []:
+                header = section.get('type') == 'table_head'
+                row_tokens = (
+                    [section] if header else list(section.get('children') or [])
+                )
+                for row_token in row_tokens:
+                    cells: List[WriterBlock] = []
+                    for cell_token in row_token.get('children') or []:
+                        rich = parse_markdown_inline(cell_token.get('children') or [])
+                        align = str((cell_token.get('attrs') or {}).get('align') or '')
+                        cells.append(WriterBlock(
+                            node_id=next_id('table-cell'),
+                            type='table_cell',
+                            content=rich.content,
+                            spans=rich.spans,
+                            references=rich.references,
+                            stage=stage,
+                            numbering={
+                                'header': header,
+                                **({'align': align} if align else {}),
+                            },
+                        ))
+                    rows.append(WriterBlock(
+                        node_id=next_id('table-row'), type='table_row',
+                        children=cells, stage=stage,
+                    ))
+            append_block(WriterBlock(
+                node_id=take_pending_node_id('table'), type='table',
+                children=rows, stage=stage,
+            ))
+            continue
+
         if token_type == 'paragraph':
             children = token.get('children') or []
             raw_paragraph = _markdown_token_text(token).strip()
@@ -539,7 +574,7 @@ def parse_document_markdown(  # noqa: C901
             type=block_type,
             content=content.strip(),
             stage=stage,
-            spans=_markdown_spans_from_token(token) if block_type in {'table', 'code'} else [],
+            spans=_markdown_spans_from_token(token) if block_type == 'code' else [],
         )
         append_block(block)
 
@@ -656,23 +691,6 @@ def _markdown_block_content(token: Dict[str, Any]) -> tuple[str, str]:
         return str(token.get('raw') or '').rstrip(), 'code'
     if token_type == 'block_quote':
         return _markdown_token_text(token).strip(), 'quote'
-    if token_type == 'table':
-        rows = []
-        for row in token.get('children') or []:
-            if row.get('type') == 'table_body':
-                rows.extend(row.get('children') or [])
-            else:
-                rows.append(row)
-        table_rows = [
-            [_markdown_token_text(cell).strip() for cell in row.get('children') or []]
-            for row in rows
-        ]
-        if not table_rows:
-            return '', 'paragraph'
-        lines = [f'| {" | ".join(table_rows[0])} |']
-        lines.append(f'| {" | ".join("---" for _ in table_rows[0])} |')
-        lines.extend(f'| {" | ".join(row)} |' for row in table_rows[1:])
-        return '\n'.join(lines), 'table'
     if token_type == 'thematic_break':
         return '---', 'divider'
     return _markdown_token_text(token), 'paragraph'

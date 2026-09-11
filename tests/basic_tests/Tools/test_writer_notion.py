@@ -267,7 +267,7 @@ class TestNotionAdapter:
         if block_type == 'code':
             assert block.provider_payload['code_language'] == 'python'
 
-    def test_preserves_notion_table_rows_without_virtual_cells(self):
+    def test_normalizes_notion_table_rows_to_cells(self):
         table_id = '55555555-5555-5555-5555-555555555555'
         row_id = '66666666-6666-6666-6666-666666666666'
         table = _block(table_id, 'table', {
@@ -291,10 +291,56 @@ class TestNotionAdapter:
         assert table_block.type == 'table'
         assert row_block.type == 'table_row'
         assert row_block.provider_binding['block_id'] == row_id
-        assert row_block.content == 'A1 | B1'
-        assert row_block.children == []
+        assert row_block.content == ''
+        assert [cell.content for cell in row_block.children] == ['A1', 'B1']
+        assert row_block.children[0].spans[0].style['bold'] is True
+        assert row_block.children[1].spans[0].style['link']['url'] == linked['href']
         assert row_block.provider_payload['table_cells'][0][0]['annotations']['bold'] is True
         assert row_block.provider_payload['table_cells'][1][0]['href'] == linked['href']
+
+        row_block.children[1].content = 'B2'
+        row_block.children[1].spans = []
+        operation = NotionWriterAdapter().patch_to_operation(PatchHunk(
+            target_node_id=row_block.children[1].node_id,
+            modify_type='update',
+            block=row_block.children[1],
+        ), document)
+        assert operation.params['block']['table_row']['cells'][0][0]['text']['content'] == 'A1'
+        assert operation.params['block']['table_row']['cells'][1][0]['text']['content'] == 'B2'
+        native = NotionWriterAdapter().ir_to_blocks(document)
+        native_table = next(block for block in native if block['type'] == 'table')
+        native_row = native_table['table']['children'][0]
+        assert native_row['table_row']['cells'][1][0]['text']['content'] == 'B2'
+        assert 'children' not in native_row['table_row']
+
+    def test_ir_to_blocks_flattens_merged_cells_for_notion(self):
+        table = WriterBlock(node_id='table', type='table', children=[
+            WriterBlock(node_id='row-1', type='table_row', children=[
+                WriterBlock(node_id='a', type='table_cell', content='A'),
+                WriterBlock(node_id='b', type='table_cell', content='B'),
+            ]),
+            WriterBlock(node_id='row-2', type='table_row', children=[
+                WriterBlock(
+                    node_id='c', type='table_cell', content='C', numbering={'row_span': 2},
+                ),
+                WriterBlock(node_id='d', type='table_cell', content='D'),
+            ]),
+            WriterBlock(node_id='row-3', type='table_row', children=[
+                WriterBlock(node_id='e', type='table_cell', content='E'),
+            ]),
+        ])
+        document = WriterDocument(
+            document_id='document', blocks=[table],
+            provider_binding={'provider': 'notion', 'document_id': DOC_ID},
+        )
+
+        native = NotionWriterAdapter().ir_to_blocks(document)
+        rows = native[0]['table']['children']
+
+        assert native[0]['table']['table_width'] == 2
+        assert [len(row['table_row']['cells']) for row in rows] == [2, 2, 2]
+        assert rows[2]['table_row']['cells'][0] == []
+        assert rows[2]['table_row']['cells'][1][0]['text']['content'] == 'E'
 
     def test_ir_to_blocks_round_trips_text_styles_payload_and_children(self):
         child = _block(CHILD_ID, 'paragraph', {'rich_text': [_rich('子段落')]},

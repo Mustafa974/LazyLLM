@@ -15,7 +15,9 @@ from ..data_models.writer_ir import (
     WriterSpan,
     WriterStage,
 )
-from ..utils import strip_caption_numbering, strip_heading_numbering
+from ..utils import (
+    strip_caption_numbering, strip_heading_numbering, table_grid, validate_writer_tables,
+)
 from .base import NativeBlock, NativePatchOperation, WriterAdapterBase
 
 
@@ -97,6 +99,32 @@ class NotionWriterAdapter(WriterAdapterBase):
             writer_by_id[parent_id].children = [
                 writer_by_id[child_id] for child_id in children
             ] + writer_by_id[parent_id].children
+        for table in writer_by_id.values():
+            if table.type != 'table':
+                continue
+            table_payload = (table.provider_payload.get('raw_block') or {}).get('table') or {}
+            has_column_header = bool(table_payload.get('has_column_header'))
+            has_row_header = bool(table_payload.get('has_row_header'))
+            for row_index, row in enumerate(table.children):
+                if row.type != 'table_row':
+                    continue
+                native_cells = row.provider_payload.get('table_cells') or []
+                row.content = ''
+                row.children = []
+                for cell_index, native_cell in enumerate(native_cells):
+                    spans = self._rich_text_to_spans(
+                        native_cell if isinstance(native_cell, list) else [],
+                    )
+                    row.children.append(WriterBlock(
+                        node_id=f'{row.node_id}-cell-{cell_index + 1}',
+                        type='table_cell',
+                        content=''.join(span.text for span in spans),
+                        spans=spans,
+                        stage=stage,
+                        numbering={'header': (
+                            has_column_header and row_index == 0
+                        ) or (has_row_header and cell_index == 0)},
+                    ))
         nested_ids = {child_id for children in child_ids.values() for child_id in children}
         root_blocks = [writer_by_id[block_id] for block_id in source_order if block_id not in nested_ids]
 
@@ -108,10 +136,12 @@ class NotionWriterAdapter(WriterAdapterBase):
             binding['uri'] = uri
         if revision is not None:
             binding['revision'] = revision
-        return WriterDocument(document_id=self.make_document_id(external_document_id), stage=stage, title=title,
-                              blocks=root_blocks, revision=revision,
-                              metadata={'source_block_count': len(blocks)}, provider_binding=binding,
-                              ui_editable=False)
+        document = WriterDocument(document_id=self.make_document_id(external_document_id), stage=stage, title=title,
+                                  blocks=root_blocks, revision=revision,
+                                  metadata={'source_block_count': len(blocks)}, provider_binding=binding,
+                                  ui_editable=False)
+        validate_writer_tables(document)
+        return document
 
     def ir_to_blocks(self, document: WriterDocument, media_assets: Any = None) -> List[NativeBlock]:
         if not isinstance(document, WriterDocument):
@@ -119,6 +149,7 @@ class NotionWriterAdapter(WriterAdapterBase):
         provider = document.provider_binding.get('provider')
         if provider and str(provider).lower() != self.provider:
             raise ValueError(f'document provider must be {self.provider!r}, got {provider!r}.')
+        validate_writer_tables(document)
 
         blocks_by_node_id = {block.node_id: block for block in document.iter_blocks()}
         if len(blocks_by_node_id) != sum(1 for _ in document.iter_blocks()):
@@ -251,8 +282,25 @@ class NotionWriterAdapter(WriterAdapterBase):
                 payload['caption'] = self._spans_to_rich_text(block, resolve_internal_ref)
             elif block_type == 'link_preview':
                 payload['url'] = block.content
+            elif block_type == 'table':
+                grid = table_grid(block)
+                rows = block.children
+                payload.update(
+                    table_width=len(grid[0]),
+                    has_column_header=bool(rows and any(
+                        cell.numbering.get('header') for cell in rows[0].children
+                    )),
+                    has_row_header=bool(rows and all(
+                        row.children and row.children[0].numbering.get('header')
+                        for row in rows
+                    )),
+                )
             elif block_type == 'table_row':
-                cells = block.provider_payload.get('table_cells')
+                cells = [
+                    self._spans_to_rich_text(cell, resolve_internal_ref)
+                    for cell in block.children
+                    if cell.type == 'table_cell'
+                ]
                 if isinstance(cells, list):
                     payload['cells'] = deepcopy(cells)
             output = {'object': 'block', 'type': block_type, block_type: payload}
@@ -262,7 +310,19 @@ class NotionWriterAdapter(WriterAdapterBase):
         if track_internal_refs:
             output['_temporary_node_id'] = block.node_id
 
-        nested_children = block.children
+        nested_children = [] if block.type == 'table_row' else block.children
+        if block.type == 'table':
+            nested_children = []
+            for row_index, (row, cells) in enumerate(zip(block.children, table_grid(block))):
+                normalized_row = row.model_copy(deep=True)
+                normalized_row.children = [
+                    cell or WriterBlock(
+                        node_id=f'{row.node_id}-covered-{row_index}-{cell_index}',
+                        type='table_cell', stage=row.stage,
+                    )
+                    for cell_index, cell in enumerate(cells)
+                ]
+                nested_children.append(normalized_row)
         if nested_children and block.type != 'heading':
             output[block_type]['children'] = self._ir_blocks_to_raw(
                 nested_children,
@@ -422,6 +482,26 @@ class NotionWriterAdapter(WriterAdapterBase):
             raise ValueError(f'patch target node does not exist: {patch.target_node_id!r}.')
         if patch.block is None:
             raise ValueError('update patch must provide block.')
+        if current.type == 'table_cell':
+            if patch.block.type != 'table_cell' or patch.block.children:
+                raise ValueError('Notion table cell updates must keep the table_cell structure.')
+            _, row, _ = self._block_location(document, current.node_id)
+            if row is None or row.type != 'table_row':
+                raise ValueError('Notion table cell is missing its table_row parent.')
+            desired_row = row.model_copy(deep=True)
+            desired_cell = desired_row.children[next(
+                index for index, cell in enumerate(row.children)
+                if cell.node_id == current.node_id
+            )]
+            for field in WRITER_BLOCK_MUTABLE_FIELDS:
+                setattr(desired_cell, field, deepcopy(getattr(patch.block, field)))
+            raw = self._native_update_block(desired_row, document)
+            raw.get('table_row', {}).pop('children', None)
+            block_id = row.provider_binding.get('block_id')
+            if not isinstance(block_id, str) or not block_id:
+                raise ValueError('Notion table row is missing its block_id binding.')
+            return NativePatchOperation(
+                operation='update', params={'block_id': block_id, 'block': raw})
         if current.type == 'image' \
                 and patch.meta.get('source') == 'system_numbering' \
                 and patch.meta.get('update_scope') == 'caption':

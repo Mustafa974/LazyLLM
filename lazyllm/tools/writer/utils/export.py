@@ -12,6 +12,7 @@ from ..numbering import (
     strip_markdown_heading_numbering_config,
 )
 from .conversion import convert_writer_content, render_document_markdown
+from .tables import validate_writer_tables
 
 
 _TEX_ESCAPES = {
@@ -153,7 +154,7 @@ def _render_tokens(tokens: list[dict[str, Any]], output_format: str) -> str:  # 
 def _export_markdown(document: WriterDocument) -> str:
     result = document.model_copy(deep=True)
     for block in result.iter_blocks():
-        if block.type not in {'paragraph', 'heading', 'quote', 'list_item'}:
+        if block.type not in {'paragraph', 'heading', 'quote', 'list_item', 'table_cell'}:
             continue
         spans = block.spans if ''.join(span.text for span in block.spans) == block.content else [
             WriterSpan(text=block.content),
@@ -176,6 +177,7 @@ def export_writer_document(
 ) -> str:
     if output_format not in {'markdown', 'latex', 'text'}:
         raise ValueError(f'Unsupported Writer output format: {output_format!r}.')
+    validate_writer_tables(document)
     for block in document.iter_blocks():
         if not block.content and not block.children and not block.references \
                 and block.provider_payload and block.type not in {'divider'}:

@@ -181,6 +181,8 @@ Output semantics:
 - Delete and move instructions have empty content lists because their result is structural.
 - new_title represents title_instruction when the plan includes a title revision.
 - Headings use type="heading" with numbering.level; inline formatting uses spans.
+- Tables use table children of type table_row, whose children are table_cell blocks. Update one cell by targeting its
+  table_cell; add, delete, or move rows and cells structurally. Never put a Markdown table in table.content.
 - All authored content is complete, self-contained, and consistent with the writing context.
 - For an image create, return exactly one new block with type="image". Its content is
   the final caption. Do not invent references or asset IDs; the system adds the single
