@@ -1,5 +1,7 @@
 from __future__ import annotations
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+import uuid
 
 from lazyllm import LOG
 from pydantic import TypeAdapter, ValidationError
@@ -12,6 +14,7 @@ from ..data_models.task import InputResource, TargetDocument, WritingTask
 from ..data_models.writer_ir import WriterDocument, WriterStage
 from ..prompts.profile_resources import RESOURCE_PROFILE_PROMPT
 from ..provider import (
+    GitHubWriterProvider,
     WriterProviderWriteOutcomeError,
     get_writer_provider,
     is_ambiguous_write_error,
@@ -167,7 +170,12 @@ class WriterResourceTools(WriterToolBase):
             raise ValueError('target_document.meta.stage must be a valid WriterStage') from exc
         writer_provider = self._writer_provider(target)
         writer_provider.require_capability('load')
-        loaded = writer_provider.load_document(target, stage=stage)
+        load_options = {}
+        if isinstance(writer_provider, GitHubWriterProvider) and self.artifact_store:
+            load_options['resource_cache_dir'] = str(
+                Path(self.artifact_store) / 'github-resources' / uuid.uuid4().hex,
+            )
+        loaded = writer_provider.load_document(target, stage=stage, **load_options)
         representation = str(loaded.get('representation') or '').strip().lower()
         source = loaded.get('source_document')
         resolved_target = self._unified_model(

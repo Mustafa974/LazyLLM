@@ -261,6 +261,15 @@ class WriterMultimodalTools(WriterToolBase):
         parsed = urlparse(uri)
         if not uri:
             raise ValueError('image resource URI is required.')
+        cache = resource.meta.get('github_resource_cache')
+        if parsed.scheme == 'githubrepo' and isinstance(cache, dict) and cache.get('uri') == uri:
+            try:
+                cached_path = Path(str(cache.get('path') or ''))
+                data = cached_path.read_bytes() if 0 < cached_path.stat().st_size <= _MAX_IMAGE_BYTES else b''
+            except (OSError, ValueError):
+                data = b''
+            if data and hashlib.sha256(data).hexdigest() == cache.get('sha256'):
+                return self._materialize_image_bytes(data, resource, suffix_hint=Path(parsed.path).suffix)
         if parsed.scheme in {'http', 'https'}:
             return self._materialize_image_bytes(
                 self._download_external_image(uri),
