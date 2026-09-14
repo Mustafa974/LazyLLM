@@ -56,6 +56,26 @@ def feishu_block_url(document_uri: str, document_id: str, block_id: str) -> str:
     return f'{base}#{block_id}'
 
 
+# Feishu TextStyle.language enum; keep numeric IDs stable.
+_CODE_LANGUAGES = dict(enumerate((
+    'plaintext abap ada apache apex assembly bash csharp c++ c '
+    'cobol css coffeescript d dart delphi django dockerfile erlang fortran '
+    'foxpro go groovy html htmlbars http haskell json java javascript '
+    'julia kotlin latex lisp logo lua matlab makefile markdown nginx '
+    'objective-c openedgeabl php perl postscript powershell prolog protobuf python r '
+    'rpg ruby rust sas scss sql scala scheme scratch shell '
+    'swift thrift typescript vbscript visual-basic xml yaml cmake diff gherkin '
+    'graphql glsl properties solidity toml '
+).split(), start=1))
+_CODE_LANGUAGE_IDS = {name: value for value, name in _CODE_LANGUAGES.items()}
+_CODE_LANGUAGE_ALIASES = {
+    '': 'plaintext', 'plain text': 'plaintext', 'text': 'plaintext',
+    'py': 'python', 'js': 'javascript', 'ts': 'typescript', 'sh': 'shell',
+    'c#': 'csharp', 'cs': 'csharp', 'cpp': 'c++', 'yml': 'yaml',
+    'objectivec': 'objective-c', 'visual basic': 'visual-basic',
+}
+
+
 _ELEMENT_TEXT_FIELDS = ('content', 'title', 'name', 'text')
 
 
@@ -63,6 +83,235 @@ class FeishuWriterAdapter(WriterAdapterBase):
     '''Convert between Feishu Docx blocks and Writer IR.'''
 
     provider = 'feishu'
+
+    @staticmethod
+    def _table_caption_block(table: WriterBlock) -> Optional[WriterBlock]:
+        if table.type != 'table' or not table.content.strip():
+            return None
+        return WriterBlock(
+            node_id=f'{table.node_id}::caption', type='paragraph',
+            content=table.content, spans=deepcopy(table.spans) or [WriterSpan(text=table.content)],
+            stage=table.stage,
+        )
+
+    @staticmethod
+    def _caption_binding(table: WriterBlock) -> Dict[str, Any]:
+        caption = table.provider_payload.get('table_caption') if table.type == 'table' else None
+        binding = caption.get('provider_binding') if isinstance(caption, dict) else None
+        return binding if isinstance(binding, dict) else {}
+
+    @classmethod
+    def _physical_index(cls, blocks: List[WriterBlock], index: int) -> int:
+        return index + sum(bool(cls._caption_binding(block).get('block_id')) for block in blocks[:index])
+
+    @classmethod
+    def _restore_known_table_captions(
+        cls, previous: WriterDocument, refreshed: WriterDocument,
+    ) -> WriterDocument:
+        if previous.provider_binding.get('document_id') != refreshed.provider_binding.get('document_id'):
+            return refreshed
+        known = {
+            block.provider_binding.get('block_id'): cls._caption_binding(block).get('block_id')
+            for block in previous.iter_blocks() if block.type == 'table'
+        }
+
+        def restore(blocks: List[WriterBlock]) -> List[WriterBlock]:
+            output: List[WriterBlock] = []
+            for block in blocks:
+                block.children = restore(block.children)
+                if block.type == 'table':
+                    block.provider_payload.pop('table_caption', None)
+                    expected = known.get(block.provider_binding.get('block_id'))
+                    caption = output[-1] if output else None
+                    if expected and caption is not None and caption.type == 'paragraph' \
+                            and caption.provider_binding.get('block_id') == expected \
+                            and caption.provider_binding.get('parent_block_id') == \
+                            block.provider_binding.get('parent_block_id'):
+                        output.pop()
+                        block.editable = True
+                        block.content = strip_caption_numbering(caption.content)
+                        block.spans = deepcopy(caption.spans)
+                        # Remove only the numbering prefix; retain inline formatting.
+                        prefix = caption.content.find(block.content) if block.content else len(caption.content)
+                        while prefix > 0 and block.spans:
+                            span = block.spans[0]
+                            removed = min(prefix, len(span.text))
+                            span.text = span.text[removed:]
+                            prefix -= removed
+                            if not span.text:
+                                block.spans.pop(0)
+                        if block.spans:
+                            block.spans[-1].text = block.spans[-1].text.rstrip()
+                        if ''.join(span.text for span in block.spans) != block.content:
+                            block.spans = [WriterSpan(text=block.content)] if block.content else []
+                        block.provider_payload['table_caption'] = {
+                            'content': caption.content,
+                            'spans': [span.model_dump() for span in caption.spans],
+                            'provider_binding': deepcopy(caption.provider_binding),
+                            'provider_payload': deepcopy(caption.provider_payload),
+                        }
+                output.append(block)
+            return output
+
+        refreshed.blocks = restore(refreshed.blocks)
+        return refreshed
+
+    @staticmethod
+    def _restore_table_node_ids(previous: WriterDocument, refreshed: WriterDocument) -> None:
+        previous_by_id = {block.node_id: block for block in previous.iter_blocks()}
+        for table in refreshed.iter_blocks():
+            old_table = previous_by_id.get(table.node_id)
+            if table.type != 'table' or old_table is None or old_table.type != 'table':
+                continue
+            if len(table.children) != len(old_table.children):
+                continue
+            for row, old_row in zip(table.children, old_table.children):
+                if len(row.children) != len(old_row.children):
+                    continue
+                if not row.provider_binding.get('block_id'):
+                    if [cell.node_id for cell in row.children] == [cell.node_id for cell in old_row.children]:
+                        row.node_id = old_row.node_id
+                elif row.node_id == old_row.node_id:
+                    for cell, old_cell in zip(row.children, old_row.children):
+                        if not cell.provider_binding.get('block_id'):
+                            cell.node_id = old_cell.node_id
+                            cell.references = deepcopy(old_cell.references)
+
+    def _table_patch_to_operation(
+        self, patch: PatchHunk, document: WriterDocument, media_assets: Any = None,
+    ) -> NativePatchOperation:
+        if not isinstance(patch, PatchHunk) or not isinstance(document, WriterDocument):
+            raise TypeError('patch and document must be PatchHunk and WriterDocument instances.')
+        current = document.block_by_id(patch.target_node_id)
+        if patch.modify_type == 'update' and current is not None and current.type == 'table':
+            return self._table_caption_update(patch, document, current, media_assets)
+        operation = self._patch_to_operation(patch, document, media_assets)
+        params = operation.params
+        if operation.operation == 'replace':
+            _, parent, index = self._block_location(document, patch.target_node_id)
+            params['source_index'] = self._physical_index(parent.children if parent else document.blocks, index)
+        if patch.modify_type == 'create':
+            parent = document.block_by_id(patch.parent_node_id) if patch.parent_node_id else None
+            siblings = parent.children if parent else document.blocks
+            params['index'] = self._physical_index(siblings, patch.index)
+        elif patch.modify_type in {'delete', 'move'}:
+            current, parent, index = self._block_location(document, patch.target_node_id)
+            siblings = parent.children if parent else document.blocks
+            source_index = self._physical_index(siblings, index)
+            caption_binding = self._caption_binding(current)
+            caption_id = caption_binding.get('block_id')
+            if patch.modify_type == 'delete':
+                params.update(start_index=source_index, end_index=source_index + 1 + bool(caption_id))
+            else:
+                target_parent = document.block_by_id(patch.parent_node_id) if patch.parent_node_id else None
+                target_siblings = target_parent.children if target_parent else document.blocks
+                target_siblings = [block for block in target_siblings if block.node_id != current.node_id]
+                target_index = self._physical_index(target_siblings, patch.index)
+                same_parent = params['source_parent_block_id'] == params['target_parent_block_id']
+                params.update(source_index=source_index + bool(caption_id), target_index=target_index)
+                if caption_id:
+                    # Move the grid first, then place its caption immediately before it.
+                    params['target_index'] += int(same_parent and source_index < target_index)
+                    caption_params = {
+                        'source_block_id': caption_id,
+                        'source_parent_block_id': params['source_parent_block_id'],
+                        'source_index': source_index + int(same_parent and target_index <= source_index),
+                        'target_parent_block_id': params['target_parent_block_id'],
+                        'target_index': target_index,
+                    }
+                    params['_caption_operation'] = NativePatchOperation('move', caption_params)
+        return operation
+
+    def _bound_caption_block(self, table: WriterBlock) -> WriterBlock:
+        saved = table.provider_payload.get('table_caption') or {}
+        caption_spans = [WriterSpan.model_validate(span) for span in saved['spans']] \
+            if 'spans' in saved else deepcopy(table.spans)
+        content = saved.get('content', table.content)
+        if ''.join(span.text for span in caption_spans) != content:
+            caption_spans = [WriterSpan(text=content)] if content else []
+        return WriterBlock(
+            node_id=f'{table.node_id}::caption', type='paragraph',
+            content=saved.get('content', table.content), stage=table.stage,
+            spans=caption_spans,
+            provider_binding=deepcopy(self._caption_binding(table)),
+            provider_payload=deepcopy(saved.get('provider_payload') or {
+                'raw_block': saved.get('raw_block') or {},
+            }),
+        )
+
+    def _table_caption_update(
+        self, patch: PatchHunk, document: WriterDocument, current: WriterBlock, media_assets: Any,
+    ) -> NativePatchOperation:
+        desired = patch.block
+        def grid_snapshot(block: WriterBlock) -> List[Dict[str, Any]]:
+            return [{
+                **child.model_dump(exclude={'provider_binding', 'provider_payload', 'editable', 'children'}),
+                'children': grid_snapshot(child),
+            } for child in block.children]
+
+        if desired is None or desired.type != 'table' or grid_snapshot(desired) != grid_snapshot(current):
+            raise ValueError('Table updates must keep the grid; update individual table cells separately.')
+        caption = self._bound_caption_block(current)
+        _, parent, index = self._block_location(document, current.node_id)
+        siblings = parent.children if parent else document.blocks
+        native_index = self._physical_index(siblings, index)
+        caption_document = document.model_copy(deep=True)
+        caption_document.blocks = [caption]
+        if self._caption_binding(current).get('block_id'):
+            caption_patch = PatchHunk(
+                target_node_id=caption.node_id, modify_type='update' if desired.content.strip() else 'delete',
+                block=caption.model_copy(update={'content': desired.content, 'spans': deepcopy(desired.spans)})
+                if desired.content.strip() else None,
+            )
+            operation = self._patch_to_operation(caption_patch, caption_document, media_assets)
+            if operation.operation == 'delete' and self.provider == 'feishu':
+                operation.params.update(start_index=native_index, end_index=native_index + 1)
+            return operation
+        if not desired.content.strip():
+            raise ValueError('Table has no bound caption to update.')
+        caption = self._table_caption_block(desired)
+        caption.node_id = f'{current.node_id}-caption'
+        operation = self._patch_to_operation(PatchHunk(
+            target_node_id=caption.node_id, modify_type='create', block=caption,
+            parent_node_id=patch.parent_node_id, index=0,
+        ), document, media_assets)
+        operation.params['parent_block_id'] = current.provider_binding.get('parent_block_id') or \
+            document.provider_binding['document_id']
+        operation.params['index'] = native_index
+        return operation
+
+    @staticmethod
+    def _update_local_caption(document: WriterDocument, patch: PatchHunk) -> None:
+        if patch.modify_type != 'update' or patch.block is None or patch.block.type != 'table':
+            return
+        table = document.block_by_id(patch.target_node_id)
+        if table is None:
+            return
+        if not patch.block.content.strip():
+            table.provider_payload.pop('table_caption', None)
+        elif 'table_caption' in table.provider_payload:
+            table.provider_payload['table_caption']['content'] = patch.block.content
+            table.provider_payload['table_caption']['spans'] = [span.model_dump() for span in patch.block.spans]
+
+    def _bind_written_document(
+        self, source: WriterDocument, relations: List[Dict[str, str]], refreshed: WriterDocument,
+    ) -> WriterDocument:
+        source = source.model_copy(deep=True)
+        mapping = {item['temporary_block_id']: item['block_id'] for item in relations}
+        for block in source.iter_blocks():
+            temporary_id = block.provider_binding.get('block_id') or block.node_id
+            block.provider_binding = {'provider': self.provider}
+            if mapping.get(temporary_id):
+                block.provider_binding['block_id'] = mapping[temporary_id]
+            if block.type == 'table':
+                block.provider_payload.pop('table_caption', None)
+                caption_id = mapping.get(f'{temporary_id}-caption')
+                if caption_id and mapping.get(temporary_id):
+                    block.provider_payload['table_caption'] = {
+                        'provider_binding': {'provider': self.provider, 'block_id': caption_id},
+                    }
+        return self.merge_refreshed_document(source, refreshed)
+
 
     def blocks_to_ir(  # noqa: C901
         self,
@@ -265,6 +514,15 @@ class FeishuWriterAdapter(WriterAdapterBase):
 
         output: List[NativeBlock] = []
         for block, parent in flat_blocks:
+            caption = self._table_caption_block(block) if block.type == 'table' else None
+            if caption is not None:
+                caption_raw = self._ir_block_to_raw(
+                    caption, media_library, resolve_internal_ref,
+                )
+                caption_raw['block_id'] = f'{output_ids[block.node_id]}-caption'
+                if parent is not None and parent.type != 'heading':
+                    caption_raw['parent_id'] = output_ids[parent.node_id]
+                output.append(caption_raw)
             raw = self._ir_block_to_raw(block, media_library, resolve_internal_ref)
             raw['block_id'] = output_ids[block.node_id]
             raw.pop('children', None)
@@ -306,6 +564,11 @@ class FeishuWriterAdapter(WriterAdapterBase):
         return output
 
     def patch_to_operation(
+        self, patch: PatchHunk, document: WriterDocument, media_assets: Any = None,
+    ) -> NativePatchOperation:
+        return self._table_patch_to_operation(patch, document, media_assets)
+
+    def _patch_to_operation(
         self,
         patch: PatchHunk,
         document: WriterDocument,
@@ -405,6 +668,10 @@ class FeishuWriterAdapter(WriterAdapterBase):
             block.references = deepcopy(previous.references)
             if block.type == previous.type == 'heading':
                 block.numbering = deepcopy(previous.numbering)
+        self._restore_table_node_ids(previous_document, refreshed_document)
+        refreshed_document = self._restore_known_table_captions(
+            previous_document, refreshed_document,
+        )
         return WriterDocument.model_validate(refreshed_document.model_dump())
 
     @staticmethod
@@ -499,17 +766,13 @@ class FeishuWriterAdapter(WriterAdapterBase):
                 },
             )
 
-        return NativePatchOperation(
-            operation='update',
-            params={
-                'requests': [{
-                    'block_id': block_id,
-                    'update_text_elements': {
-                        'elements': self._spans_to_elements(desired),
-                    },
-                }],
+        request = {
+            'block_id': block_id,
+            'update_text_elements': {
+                'elements': desired_raw[_BLOCK_TYPE_FIELDS[desired_type]]['elements'],
             },
-        )
+        }
+        return NativePatchOperation(operation='update', params={'requests': [request]})
 
     def _create_patch_to_operation(
         self,
@@ -621,6 +884,14 @@ class FeishuWriterAdapter(WriterAdapterBase):
         )
 
     @staticmethod
+    def _math_expression(content: str) -> str:
+        value = content.strip()
+        for left, right in [('$$', '$$'), ('\\[', '\\]'), ('\\(', '\\)'), ('$', '$')]:
+            if value.startswith(left) and value.endswith(right):
+                return value[len(left):-len(right)].strip()
+        return value
+
+    @staticmethod
     def _block_location(
         document: WriterDocument,
         node_id: str,
@@ -723,6 +994,9 @@ class FeishuWriterAdapter(WriterAdapterBase):
             provider_payload={
                 'raw_block': deepcopy(raw),
                 'source_index': source_index,
+                **({'code_language': _CODE_LANGUAGES.get(
+                    ((raw.get('code') or {}).get('style') or {}).get('language'), '')}
+                   if block_type == 14 else {}),
             },
             editable=block_type in _TEXT_BLOCK_TYPES,
         )
@@ -747,6 +1021,13 @@ class FeishuWriterAdapter(WriterAdapterBase):
         original_type = original.get('block_type')
         block_type = self._block_type_from_ir(block, original_type)
 
+        if block.type == 'math':
+            expression = self._math_expression(block.content)
+            if not expression.startswith(r'\begin{'):
+                expression = r'\begin{equation}' + expression + r'\end{equation}'
+            return {'block_type': 2, 'text': {'elements': [
+                {'equation': {'content': expression}},
+            ]}}
         if block.type == 'table':
             grid = table_grid(block)
             columns = len(grid[0])
@@ -770,6 +1051,10 @@ class FeishuWriterAdapter(WriterAdapterBase):
                     if cell is not None and cell.content else None
                     for cell in row
                 ]
+                for row in grid
+            ]
+            raw['_table_cell_ids'] = [
+                [cell.node_id if cell is not None else '' for cell in row]
                 for row in grid
             ]
             return raw
@@ -799,6 +1084,18 @@ class FeishuWriterAdapter(WriterAdapterBase):
             and block.content == original_content
             and block.spans == original_spans
         )
+        if block_type == 14:
+            code = raw.setdefault('code', {})
+            style = code.get('style') or {}
+            if original_type == 14:
+                language_id = style.get('language')
+                if language_id not in _CODE_LANGUAGES:
+                    language_id = 1
+            else:
+                language = str(block.provider_payload.get('code_language') or '').strip().lower()
+                name = _CODE_LANGUAGE_ALIASES.get(language, language)
+                language_id = _CODE_LANGUAGE_IDS.get(name, 1)
+            code['style'] = {**style, 'language': language_id}
         if same_visible_content:
             return raw
 
@@ -823,7 +1120,7 @@ class FeishuWriterAdapter(WriterAdapterBase):
         original = self._raw_payload(block)
         if original:
             caption = ((original.get('image') or {}).get('caption') or {}).get('content') or ''
-            if block.content != caption:
+            if block.content not in {caption, strip_caption_numbering(caption)}:
                 raise ValueError('Updating an existing Feishu image is not supported.')
             return deepcopy(original)
         return self._image_block_to_raw(block, media_assets)
@@ -859,6 +1156,8 @@ class FeishuWriterAdapter(WriterAdapterBase):
         }
 
     def _block_type_from_ir(self, block: WriterBlock, original_type: Any) -> int:
+        if block.type == 'math':
+            return 2
         if block.type == 'heading':
             level = block.numbering.get('level')
             if not isinstance(level, int) or isinstance(level, bool) or not 1 <= level <= 9:
@@ -936,6 +1235,17 @@ class FeishuWriterAdapter(WriterAdapterBase):
         for element in elements:
             if not isinstance(element, dict):
                 continue
+            equation = element.get('equation')
+            if isinstance(equation, dict):
+                raw_style = equation.get('text_element_style') or {}
+                styles = {'math_source': True}
+                styles.update({ir_style: True for field, ir_style in _STYLE_TO_IR.items()
+                               if raw_style.get(field) is True})
+                styles.update({field: deepcopy(raw_style[field]) for field in _VALUE_STYLE_FIELDS
+                               if field in raw_style})
+                spans.append(WriterSpan(text='$$' + str(equation.get('content') or '') + '$$',
+                                        style=styles))
+                continue
             text_run = element.get('text_run')
             if isinstance(text_run, dict):
                 text = text_run.get('content')
@@ -1005,6 +1315,12 @@ class FeishuWriterAdapter(WriterAdapterBase):
                 for field in _VALUE_STYLE_FIELDS
                 if field in span.style
             })
+            if span.style.get('math_source'):
+                equation = {'content': cls._math_expression(span.text)}
+                if raw_style:
+                    equation['text_element_style'] = raw_style
+                elements.append({'equation': equation})
+                continue
             link = span.style.get('link')
             link_url: Optional[str] = None
             if isinstance(link, dict) and isinstance(link.get('url'), str):

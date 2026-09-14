@@ -70,6 +70,54 @@ def prepare_docx_descendants(
         descendants.append(descendant)
         if block.get('parent_id') not in raw_by_id:
             root_block_ids.append(block_id)
+    table_cells = {
+        block.get('block_id'): (
+            block.get('_table_cells'), block.get('_table_cell_ids'),
+        )
+        for block in content_blocks
+        if block.get('block_type') == 31 and isinstance(block.get('_table_cells'), list)
+    }
+    table_descendants: List[Dict[str, Any]] = []
+    for descendant in descendants:
+        table_grid = table_cells.get(descendant.get('block_id'))
+        if table_grid is None:
+            continue
+        grid, node_ids = table_grid
+        table_id = str(descendant['block_id'])
+        cell_ids: List[str] = []
+        for row_index, row in enumerate(grid):
+            for column_index, elements in enumerate(row):
+                requested_id = (
+                    node_ids[row_index][column_index]
+                    if isinstance(node_ids, list)
+                    and row_index < len(node_ids)
+                    and isinstance(node_ids[row_index], list)
+                    and column_index < len(node_ids[row_index])
+                    else ''
+                )
+                fallback_id = (
+                    f'{table_id}-covered-{row_index}-{column_index}'
+                    if isinstance(node_ids, list)
+                    else f'{table_id}_cell_{row_index}_{column_index}'
+                )
+                cell_id = str(requested_id or fallback_id)
+                text_id = (
+                    f'{cell_id}::text' if isinstance(node_ids, list)
+                    else f'{cell_id}_text'
+                )
+                cell_ids.append(cell_id)
+                table_descendants.extend([{
+                    'block_id': cell_id,
+                    'block_type': 32,
+                    'table_cell': {},
+                    'children': [text_id],
+                }, {
+                    'block_id': text_id,
+                    'block_type': 2,
+                    'text': {'elements': deepcopy(elements or [])},
+                }])
+        descendant['children'] = cell_ids
+    descendants.extend(table_descendants)
     return root_block_ids, descendants
 
 

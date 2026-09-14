@@ -572,6 +572,8 @@ class FeishuFSBase(LinkDocumentFSBase):
         for descendant in api_descendants:
             if isinstance(descendant, dict):
                 descendant.pop('_media', None)
+                descendant.pop('_table_cells', None)
+                descendant.pop('_table_cell_ids', None)
         response = self._post(
             url,
             params={'document_revision_id': document_revision_id},
@@ -1218,6 +1220,8 @@ class FeishuFSBase(LinkDocumentFSBase):
         self,
         document_id: str,
         blocks: List[Dict[str, Any]],
+        *,
+        block_id_relations: Optional[List[Dict[str, str]]] = None,
     ) -> List[Dict[str, Any]]:
         '''Append native blocks to an existing Feishu document.'''
         if not isinstance(blocks, list):
@@ -1233,15 +1237,19 @@ class FeishuFSBase(LinkDocumentFSBase):
             except (TypeError, ValueError):
                 document_revision_id = -1
             document_revision_id = self._bind_docx_images(
-                document_id, blocks, created, document_revision_id)
+                document_id, blocks, created, document_revision_id, raise_on_error=True)
             document_revision_id = self._bind_docx_links(
                 document_id, blocks, created, document_revision_id)
+        if block_id_relations is not None and descendants:
+            block_id_relations.extend(created.get('block_id_relations') or [])
         return self._get_doc_blocks_raw(document_id, with_descendants=True)
 
     def replace_doc_blocks(
         self,
         document_id: str,
         blocks: List[Dict[str, Any]],
+        *,
+        block_id_relations: Optional[List[Dict[str, str]]] = None,
     ) -> List[Dict[str, Any]]:
         '''Replace all root content blocks in an existing Feishu document.'''
         if not isinstance(blocks, list):
@@ -1266,7 +1274,7 @@ class FeishuFSBase(LinkDocumentFSBase):
             except (TypeError, ValueError):
                 document_revision_id = -1
             document_revision_id = self._bind_docx_images(
-                document_id, blocks, created, document_revision_id)
+                document_id, blocks, created, document_revision_id, raise_on_error=True)
             document_revision_id = self._bind_docx_links(
                 document_id, blocks, created, document_revision_id)
 
@@ -1279,6 +1287,8 @@ class FeishuFSBase(LinkDocumentFSBase):
                 existing_count,
                 document_revision_id=document_revision_id,
             )
+        if block_id_relations is not None and descendants:
+            block_id_relations.extend(created.get('block_id_relations') or [])
         return self._get_doc_blocks_raw(document_id, with_descendants=True)
 
     def _get_table_cells(self, document_id: str, table_block_id: str) -> List[Dict[str, Any]]:
