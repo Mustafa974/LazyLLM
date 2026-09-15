@@ -59,6 +59,20 @@ def strip_caption_numbering(value: str) -> str:
     return text[match.end():].strip() if match else text
 
 
+def strip_math_delimiters(content: str) -> str:
+    '''Return a math expression without common Markdown/LaTeX delimiters.'''
+    value = content.strip()
+    for left, right in (
+        ('$$', '$$'),
+        ('\\[', '\\]'),
+        ('\\(', '\\)'),
+        ('$', '$'),
+    ):
+        if value.startswith(left) and value.endswith(right):
+            return value[len(left):-len(right)].strip()
+    return value
+
+
 def to_prompt_json(value: Any) -> str:
     def default(obj: Any) -> Any:
         if hasattr(obj, 'model_dump'):

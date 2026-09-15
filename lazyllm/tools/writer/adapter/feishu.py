@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlparse
 
-from ..utils.feishu_docx import DOCX_BLOCK_TYPE_FIELDS, prepare_docx_descendants
 from ..utils import (
-    strip_caption_numbering, strip_heading_numbering, table_grid, validate_writer_tables,
+    strip_caption_numbering, strip_heading_numbering, strip_math_delimiters,
+    table_grid, validate_writer_tables,
 )
 from ..data_models.revision import PatchHunk
 from ..data_models.multimodal import MediaAssetLibrary
@@ -21,7 +21,13 @@ from ..data_models.writer_ir import (
 from .base import NativeBlock, NativePatchOperation, WriterAdapterBase
 
 
-_BLOCK_TYPE_FIELDS = DOCX_BLOCK_TYPE_FIELDS
+_BLOCK_TYPE_FIELDS: Dict[int, str] = {
+    1: 'page', 2: 'text', 3: 'heading1', 4: 'heading2', 5: 'heading3', 6: 'heading4',
+    7: 'heading5', 8: 'heading6', 9: 'heading7', 10: 'heading8', 11: 'heading9',
+    12: 'bullet', 13: 'ordered', 14: 'code', 15: 'quote', 17: 'todo',
+    19: 'callout', 22: 'divider', 24: 'grid', 25: 'grid_column', 27: 'image',
+    31: 'table', 32: 'table_cell', 34: 'quote_container',
+}
 
 _BLOCK_TYPE_NAMES: Dict[int, str] = {
     1: 'document', 2: 'paragraph',
@@ -83,99 +89,27 @@ class FeishuWriterAdapter(WriterAdapterBase):
     '''Convert between Feishu Docx blocks and Writer IR.'''
 
     provider = 'feishu'
+    materializes_table_captions = True
 
     @staticmethod
-    def _table_caption_block(table: WriterBlock) -> Optional[WriterBlock]:
-        if table.type != 'table' or not table.content.strip():
-            return None
-        return WriterBlock(
-            node_id=f'{table.node_id}::caption', type='paragraph',
-            content=table.content, spans=deepcopy(table.spans) or [WriterSpan(text=table.content)],
-            stage=table.stage,
-        )
+    def _written_temporary_id(block: WriterBlock) -> str:
+        return block.provider_binding.get('block_id') or block.node_id
 
     @staticmethod
-    def _caption_binding(table: WriterBlock) -> Dict[str, Any]:
-        caption = table.provider_payload.get('table_caption') if table.type == 'table' else None
-        binding = caption.get('provider_binding') if isinstance(caption, dict) else None
-        return binding if isinstance(binding, dict) else {}
-
-    @classmethod
-    def _physical_index(cls, blocks: List[WriterBlock], index: int) -> int:
-        return index + sum(bool(cls._caption_binding(block).get('block_id')) for block in blocks[:index])
-
-    @classmethod
-    def _restore_known_table_captions(
-        cls, previous: WriterDocument, refreshed: WriterDocument,
-    ) -> WriterDocument:
-        if previous.provider_binding.get('document_id') != refreshed.provider_binding.get('document_id'):
-            return refreshed
-        known = {
-            block.provider_binding.get('block_id'): cls._caption_binding(block).get('block_id')
-            for block in previous.iter_blocks() if block.type == 'table'
-        }
-
-        def restore(blocks: List[WriterBlock]) -> List[WriterBlock]:
-            output: List[WriterBlock] = []
-            for block in blocks:
-                block.children = restore(block.children)
-                if block.type == 'table':
-                    block.provider_payload.pop('table_caption', None)
-                    expected = known.get(block.provider_binding.get('block_id'))
-                    caption = output[-1] if output else None
-                    if expected and caption is not None and caption.type == 'paragraph' \
-                            and caption.provider_binding.get('block_id') == expected \
-                            and caption.provider_binding.get('parent_block_id') == \
-                            block.provider_binding.get('parent_block_id'):
-                        output.pop()
-                        block.editable = True
-                        block.content = strip_caption_numbering(caption.content)
-                        block.spans = deepcopy(caption.spans)
-                        # Remove only the numbering prefix; retain inline formatting.
-                        prefix = caption.content.find(block.content) if block.content else len(caption.content)
-                        while prefix > 0 and block.spans:
-                            span = block.spans[0]
-                            removed = min(prefix, len(span.text))
-                            span.text = span.text[removed:]
-                            prefix -= removed
-                            if not span.text:
-                                block.spans.pop(0)
-                        if block.spans:
-                            block.spans[-1].text = block.spans[-1].text.rstrip()
-                        if ''.join(span.text for span in block.spans) != block.content:
-                            block.spans = [WriterSpan(text=block.content)] if block.content else []
-                        block.provider_payload['table_caption'] = {
-                            'content': caption.content,
-                            'spans': [span.model_dump() for span in caption.spans],
-                            'provider_binding': deepcopy(caption.provider_binding),
-                            'provider_payload': deepcopy(caption.provider_payload),
-                        }
-                output.append(block)
-            return output
-
-        refreshed.blocks = restore(refreshed.blocks)
-        return refreshed
+    def _written_caption_id(temporary_id: str) -> str:
+        return f'{temporary_id}-caption'
 
     @staticmethod
-    def _restore_table_node_ids(previous: WriterDocument, refreshed: WriterDocument) -> None:
-        previous_by_id = {block.node_id: block for block in previous.iter_blocks()}
-        for table in refreshed.iter_blocks():
-            old_table = previous_by_id.get(table.node_id)
-            if table.type != 'table' or old_table is None or old_table.type != 'table':
-                continue
-            if len(table.children) != len(old_table.children):
-                continue
-            for row, old_row in zip(table.children, old_table.children):
-                if len(row.children) != len(old_row.children):
-                    continue
-                if not row.provider_binding.get('block_id'):
-                    if [cell.node_id for cell in row.children] == [cell.node_id for cell in old_row.children]:
-                        row.node_id = old_row.node_id
-                elif row.node_id == old_row.node_id:
-                    for cell, old_cell in zip(row.children, old_row.children):
-                        if not cell.provider_binding.get('block_id'):
-                            cell.node_id = old_cell.node_id
-                            cell.references = deepcopy(old_cell.references)
+    def _new_caption_node_id(table_node_id: str) -> str:
+        return f'{table_node_id}-caption'
+
+    @staticmethod
+    def _prepare_caption_delete(
+        operation: NativePatchOperation, native_index: int,
+    ) -> NativePatchOperation:
+        if operation.operation == 'delete':
+            operation.params.update(start_index=native_index, end_index=native_index + 1)
+        return operation
 
     def _table_patch_to_operation(
         self, patch: PatchHunk, document: WriterDocument, media_assets: Any = None,
@@ -221,97 +155,6 @@ class FeishuWriterAdapter(WriterAdapterBase):
                     }
                     params['_caption_operation'] = NativePatchOperation('move', caption_params)
         return operation
-
-    def _bound_caption_block(self, table: WriterBlock) -> WriterBlock:
-        saved = table.provider_payload.get('table_caption') or {}
-        caption_spans = [WriterSpan.model_validate(span) for span in saved['spans']] \
-            if 'spans' in saved else deepcopy(table.spans)
-        content = saved.get('content', table.content)
-        if ''.join(span.text for span in caption_spans) != content:
-            caption_spans = [WriterSpan(text=content)] if content else []
-        return WriterBlock(
-            node_id=f'{table.node_id}::caption', type='paragraph',
-            content=saved.get('content', table.content), stage=table.stage,
-            spans=caption_spans,
-            provider_binding=deepcopy(self._caption_binding(table)),
-            provider_payload=deepcopy(saved.get('provider_payload') or {
-                'raw_block': saved.get('raw_block') or {},
-            }),
-        )
-
-    def _table_caption_update(
-        self, patch: PatchHunk, document: WriterDocument, current: WriterBlock, media_assets: Any,
-    ) -> NativePatchOperation:
-        desired = patch.block
-        def grid_snapshot(block: WriterBlock) -> List[Dict[str, Any]]:
-            return [{
-                **child.model_dump(exclude={'provider_binding', 'provider_payload', 'editable', 'children'}),
-                'children': grid_snapshot(child),
-            } for child in block.children]
-
-        if desired is None or desired.type != 'table' or grid_snapshot(desired) != grid_snapshot(current):
-            raise ValueError('Table updates must keep the grid; update individual table cells separately.')
-        caption = self._bound_caption_block(current)
-        _, parent, index = self._block_location(document, current.node_id)
-        siblings = parent.children if parent else document.blocks
-        native_index = self._physical_index(siblings, index)
-        caption_document = document.model_copy(deep=True)
-        caption_document.blocks = [caption]
-        if self._caption_binding(current).get('block_id'):
-            caption_patch = PatchHunk(
-                target_node_id=caption.node_id, modify_type='update' if desired.content.strip() else 'delete',
-                block=caption.model_copy(update={'content': desired.content, 'spans': deepcopy(desired.spans)})
-                if desired.content.strip() else None,
-            )
-            operation = self._patch_to_operation(caption_patch, caption_document, media_assets)
-            if operation.operation == 'delete' and self.provider == 'feishu':
-                operation.params.update(start_index=native_index, end_index=native_index + 1)
-            return operation
-        if not desired.content.strip():
-            raise ValueError('Table has no bound caption to update.')
-        caption = self._table_caption_block(desired)
-        caption.node_id = f'{current.node_id}-caption'
-        operation = self._patch_to_operation(PatchHunk(
-            target_node_id=caption.node_id, modify_type='create', block=caption,
-            parent_node_id=patch.parent_node_id, index=0,
-        ), document, media_assets)
-        operation.params['parent_block_id'] = current.provider_binding.get('parent_block_id') or \
-            document.provider_binding['document_id']
-        operation.params['index'] = native_index
-        return operation
-
-    @staticmethod
-    def _update_local_caption(document: WriterDocument, patch: PatchHunk) -> None:
-        if patch.modify_type != 'update' or patch.block is None or patch.block.type != 'table':
-            return
-        table = document.block_by_id(patch.target_node_id)
-        if table is None:
-            return
-        if not patch.block.content.strip():
-            table.provider_payload.pop('table_caption', None)
-        elif 'table_caption' in table.provider_payload:
-            table.provider_payload['table_caption']['content'] = patch.block.content
-            table.provider_payload['table_caption']['spans'] = [span.model_dump() for span in patch.block.spans]
-
-    def _bind_written_document(
-        self, source: WriterDocument, relations: List[Dict[str, str]], refreshed: WriterDocument,
-    ) -> WriterDocument:
-        source = source.model_copy(deep=True)
-        mapping = {item['temporary_block_id']: item['block_id'] for item in relations}
-        for block in source.iter_blocks():
-            temporary_id = block.provider_binding.get('block_id') or block.node_id
-            block.provider_binding = {'provider': self.provider}
-            if mapping.get(temporary_id):
-                block.provider_binding['block_id'] = mapping[temporary_id]
-            if block.type == 'table':
-                block.provider_payload.pop('table_caption', None)
-                caption_id = mapping.get(f'{temporary_id}-caption')
-                if caption_id and mapping.get(temporary_id):
-                    block.provider_payload['table_caption'] = {
-                        'provider_binding': {'provider': self.provider, 'block_id': caption_id},
-                    }
-        return self.merge_refreshed_document(source, refreshed)
-
 
     def blocks_to_ir(  # noqa: C901
         self,
@@ -615,21 +458,17 @@ class FeishuWriterAdapter(WriterAdapterBase):
 
         if operation is not None and operation.operation == 'create':
             relations = (
-                operation_result.get('block_id_relations')
+                operation_result.get('node_id_bindings')
                 if isinstance(operation_result, dict) else None
             )
-            if not isinstance(relations, list) or not relations:
-                raise ValueError('create operation did not return Feishu block ID relations.')
+            if not isinstance(relations, dict) or not relations:
+                raise ValueError('create operation did not return Feishu node ID bindings.')
             refreshed_by_block_id = {
                 block.provider_binding.get('block_id'): block
                 for block in refreshed_document.iter_blocks()
                 if isinstance(block.provider_binding.get('block_id'), str)
             }
-            for relation in relations:
-                if not isinstance(relation, dict):
-                    continue
-                temporary_id = relation.get('temporary_block_id')
-                created_id = relation.get('block_id')
+            for temporary_id, created_id in relations.items():
                 refreshed = refreshed_by_block_id.get(created_id)
                 if isinstance(temporary_id, str) and refreshed is not None:
                     refreshed.node_id = temporary_id
@@ -638,24 +477,24 @@ class FeishuWriterAdapter(WriterAdapterBase):
                         refreshed.references = deepcopy(patch.block.references)
 
         if operation is not None and operation.operation in {'move', 'replace'}:
-            relations = (
-                operation_result.get('block_id_relations')
+            provider_id_remap = (
+                operation_result.get('provider_id_remap')
                 if isinstance(operation_result, dict) else None
             )
-            if not isinstance(relations, dict) or not relations:
+            if not isinstance(provider_id_remap, dict) or not provider_id_remap:
                 raise ValueError(
-                    f'{operation.operation} operation did not return Feishu block ID relations.')
+                    f'{operation.operation} operation did not return Feishu provider ID remap.')
             refreshed_by_block_id = {
                 block.provider_binding.get('block_id'): block
                 for block in refreshed_document.iter_blocks()
                 if isinstance(block.provider_binding.get('block_id'), str)
             }
-            for source_block_id, created_block_id in relations.items():
+            for source_block_id, created_block_id in provider_id_remap.items():
                 node_id = previous_ids.get(source_block_id)
                 refreshed = refreshed_by_block_id.get(created_block_id)
                 if node_id is None or refreshed is None:
                     raise ValueError(
-                        'move block ID relations do not match the refreshed document.')
+                        'provider ID remap does not match the refreshed document.')
                 refreshed.node_id = node_id
 
         self._rebase_internal_reference_targets(refreshed_document, refreshed_ids)
@@ -668,10 +507,7 @@ class FeishuWriterAdapter(WriterAdapterBase):
             block.references = deepcopy(previous.references)
             if block.type == previous.type == 'heading':
                 block.numbering = deepcopy(previous.numbering)
-        self._restore_table_node_ids(previous_document, refreshed_document)
-        refreshed_document = self._restore_known_table_captions(
-            previous_document, refreshed_document,
-        )
+        refreshed_document = self._restore_table_state(previous_document, refreshed_document)
         return WriterDocument.model_validate(refreshed_document.model_dump())
 
     @staticmethod
@@ -780,7 +616,7 @@ class FeishuWriterAdapter(WriterAdapterBase):
         document: WriterDocument,
         media_assets: Any = None,
     ) -> NativePatchOperation:
-        '''Convert a semantic block creation into Feishu descendant creation.'''
+        '''Convert a semantic block creation into native Feishu blocks.'''
         if patch.block is None or patch.index is None:
             raise ValueError('create patch requires block and index.')
         parent_block_id = document.provider_binding.get('document_id')
@@ -803,25 +639,12 @@ class FeishuWriterAdapter(WriterAdapterBase):
             },
         )
         native_blocks = self.ir_to_blocks(inserted_document, media_assets=media_assets)
-        children_id, descendants = prepare_docx_descendants(native_blocks)
-        media_by_block_id = {
-            block.get('block_id'): block.get('_media')
-            for block in native_blocks
-            if isinstance(block.get('_media'), dict)
-        }
-        for descendant in descendants:
-            media = media_by_block_id.get(descendant.get('block_id'))
-            if media is not None:
-                # Keep this private metadata in the operation so the Feishu
-                # supplier can bind the uploaded media after block creation.
-                descendant['_media'] = deepcopy(media)
         return NativePatchOperation(
             operation='create',
             params={
                 'parent_block_id': parent_block_id,
                 'index': patch.index,
-                'children_id': children_id,
-                'descendants': descendants,
+                'blocks': native_blocks,
             },
         )
 
@@ -882,14 +705,6 @@ class FeishuWriterAdapter(WriterAdapterBase):
                 'target_index': patch.index,
             },
         )
-
-    @staticmethod
-    def _math_expression(content: str) -> str:
-        value = content.strip()
-        for left, right in [('$$', '$$'), ('\\[', '\\]'), ('\\(', '\\)'), ('$', '$')]:
-            if value.startswith(left) and value.endswith(right):
-                return value[len(left):-len(right)].strip()
-        return value
 
     @staticmethod
     def _block_location(
@@ -1022,7 +837,7 @@ class FeishuWriterAdapter(WriterAdapterBase):
         block_type = self._block_type_from_ir(block, original_type)
 
         if block.type == 'math':
-            expression = self._math_expression(block.content)
+            expression = strip_math_delimiters(block.content)
             if not expression.startswith(r'\begin{'):
                 expression = r'\begin{equation}' + expression + r'\end{equation}'
             return {'block_type': 2, 'text': {'elements': [
@@ -1316,7 +1131,7 @@ class FeishuWriterAdapter(WriterAdapterBase):
                 if field in span.style
             })
             if span.style.get('math_source'):
-                equation = {'content': cls._math_expression(span.text)}
+                equation = {'content': strip_math_delimiters(span.text)}
                 if raw_style:
                     equation['text_element_style'] = raw_style
                 elements.append({'equation': equation})

@@ -16,13 +16,12 @@ from .base import (
 )
 from ..adapter.base import NativePatchOperation, WriterAdapterBase
 from ..adapter.notion import NotionWriterAdapter
-from ..utils import validate_writer_tables
 from ..data_models.multimodal import MediaAssetLibrary
 from ..data_models.revision import PatchHunk, PatchResult, PatchSet
 from ..data_models.task import TargetDocument
-from ..data_models.writer_ir import WRITER_BLOCK_MUTABLE_FIELDS, WriterDocument, WriterStage
+from ..data_models.writer_ir import WriterDocument, WriterStage
 from ..numbering import build_numbering_view_from_ir, compute_numbering, format_target_number, materialize_ir
-from ..tools.revision_tools import apply_patch_to_ir
+from ..tools.revision_tools import apply_patch_to_ir, apply_persisted_patch_hunk
 from ..utils import strip_caption_numbering
 
 
@@ -267,7 +266,6 @@ class NotionWriterProvider(WriterProviderBase):
             persisted = persisted.model_copy(update={'title': patch_set.new_title})
 
         for sync_hunk in self._numbering_sync_hunks(numbered_document, persisted):
-            NotionWriterProvider._apply_local_operation(persisted, sync_hunk)
             operation = adapter.patch_to_operation(
                 sync_hunk, persisted, media_assets=media_assets)
             try:
@@ -313,42 +311,6 @@ class NotionWriterProvider(WriterProviderBase):
         }
 
     @staticmethod
-    def _apply_local_operation(document: WriterDocument, patch: PatchHunk) -> WriterDocument:
-        # Synchronize an executed operation; never reapply model revision policy here.
-        patch = PatchSet(target_doc_id=document.document_id, hunks=[patch]).hunks[0]
-        validate_writer_tables(document)
-        updated = document.model_copy(deep=True)
-        updated.ui_editable = False
-        target = updated.block_by_id(patch.target_node_id)
-        if patch.modify_type != 'create' and target is None:
-            raise ValueError(f'patch target node does not exist: {patch.target_node_id!r}.')
-        if patch.modify_type == 'update':
-            # Keep the latest bindings/payloads: the patch may predate an earlier ID replacement.
-            for field in WRITER_BLOCK_MUTABLE_FIELDS:
-                setattr(target, field, deepcopy(getattr(patch.block, field)))
-        else:
-            if patch.modify_type in {'delete', 'move'}:
-                if patch.modify_type == 'move' and any(
-                    item.node_id == patch.parent_node_id for item in target.iter_blocks()
-                ):
-                    raise ValueError('move target cannot be moved into its own subtree.')
-                siblings = [updated.blocks, *(item.children for item in updated.iter_blocks())]
-                next(items for items in siblings if any(item is target for item in items)).remove(target)
-            if patch.modify_type in {'create', 'move'}:
-                parent = updated.block_by_id(patch.parent_node_id) if patch.parent_node_id else None
-                if patch.parent_node_id and parent is None:
-                    raise ValueError(f'parent block {patch.parent_node_id!r} is absent from document.')
-                children = parent.children if parent is not None else updated.blocks
-                if patch.index is None or not 0 <= patch.index <= len(children):
-                    raise ValueError(f'{patch.modify_type} index is outside its parent.')
-                children.insert(patch.index, patch.block.model_copy(deep=True) if patch.modify_type == 'create' else target)
-        node_ids = [item.node_id for item in updated.iter_blocks()]
-        if len(node_ids) != len(set(node_ids)):
-            raise ValueError('operation produced duplicate node_ids.')
-        validate_writer_tables(updated)
-        return WriterDocument.model_validate(updated.model_dump())
-
-    @staticmethod
     def _apply_operation_result_locally(
         document: WriterDocument,
         patch: PatchHunk,
@@ -358,17 +320,17 @@ class NotionWriterProvider(WriterProviderBase):
         media_assets: MediaAssetLibrary | None,
     ) -> WriterDocument:
         '''Advance Writer IR without rereading the entire Notion page.'''
-        updated = NotionWriterProvider._apply_local_operation(document, patch)
+        updated = apply_persisted_patch_hunk(document, patch)
 
         if operation.operation not in {'create', 'move'}:
             NotionWriterAdapter._update_local_caption(updated, patch)
             return updated
 
-        relations = operation_result.get('block_id_relations') \
+        bindings = operation_result.get('node_id_bindings') \
             if isinstance(operation_result, dict) else None
-        if not isinstance(relations, list) or not relations:
+        if not isinstance(bindings, dict) or not bindings:
             raise ValueError(
-                f'{operation.operation} operation did not return Notion block ID relations.')
+                f'{operation.operation} operation did not return Notion node ID bindings.')
 
         native_by_node_id: dict[str, dict[str, Any]] = {}
 
@@ -390,21 +352,14 @@ class NotionWriterProvider(WriterProviderBase):
         caption_operation = operation.params.get('_caption_operation')
         if caption_operation is not None:
             collect_native(caption_operation.params.get('block'))
-        relation_map = {
-            item.get('temporary_block_id'): item.get('block_id')
-            for item in relations if isinstance(item, dict)
-        }
+        relation_map = bindings
         if any(not isinstance(relation_map.get(node_id), str) or not relation_map[node_id]
                for node_id in native_by_node_id):
             raise ValueError('Notion operation returned incomplete block ID relations.')
         physical_ids = [relation_map[node_id] for node_id in native_by_node_id]
         if len(physical_ids) != len(set(physical_ids)):
             raise ValueError('Notion operation returned duplicate block IDs.')
-        for relation in relations:
-            if not isinstance(relation, dict):
-                continue
-            node_id = relation.get('temporary_block_id')
-            block_id = relation.get('block_id')
+        for node_id, block_id in bindings.items():
             if not isinstance(node_id, str) or not node_id \
                     or not isinstance(block_id, str) or not block_id:
                 continue
@@ -556,6 +511,14 @@ class NotionWriterProvider(WriterProviderBase):
         source_document = converted.source_document.model_copy(deep=True)
         protocol, real_path, fs, _, locator, document_id = \
             self._resolve_document_target(target, source_document=source_document)
+        if source_document.revision is not None:
+            current_revision = str(
+                self._document_metadata(fs, real_path).get('last_edited_time') or '',
+            ) or None
+            if current_revision != source_document.revision:
+                raise WriterProviderRevisionError(
+                    self.provider, source_document.revision, current_revision,
+                )
         source_document.provider_binding = {
             **source_document.provider_binding,
             'provider': protocol,
@@ -598,7 +561,7 @@ class NotionWriterProvider(WriterProviderBase):
             refreshed.metadata['provider_metadata'] = metadata
             persisted_result = {
                 'representation': 'ir',
-                'persisted_document': adapter._bind_written_document(source_document, relations, refreshed),
+                'persisted_document': adapter.bind_written_document(source_document, relations, refreshed),
             }
         return {
             **persisted_result,
@@ -653,6 +616,17 @@ class NotionWriterProvider(WriterProviderBase):
         params = dict(operation.params)
         caption_operation = params.pop('_caption_operation', None)
         result = method(document_id=document_id, **params)
+        temporary_bindings = result.pop('block_id_relations', None)
+        if temporary_bindings is not None:
+            result['node_id_bindings'] = {
+                relation['temporary_block_id']: relation['block_id']
+                for relation in temporary_bindings
+                if isinstance(relation, dict)
+                and isinstance(relation.get('temporary_block_id'), str)
+                and relation.get('temporary_block_id')
+                and isinstance(relation.get('block_id'), str)
+                and relation.get('block_id')
+            }
         if caption_operation is not None:
             try:
                 extra = NotionWriterProvider._execute_native_operation(fs, document_id, caption_operation)
@@ -662,10 +636,10 @@ class NotionWriterProvider(WriterProviderBase):
                 ) from exc
             result = {
                 **result,
-                'block_id_relations': [
-                    *(result.get('block_id_relations') or []),
-                    *(extra.get('block_id_relations') or []),
-                ],
+                'node_id_bindings': {
+                    **(result.get('node_id_bindings') or {}),
+                    **(extra.get('node_id_bindings') or {}),
+                },
             }
         return result
 

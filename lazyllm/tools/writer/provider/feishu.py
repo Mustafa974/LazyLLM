@@ -11,22 +11,22 @@ from .base import (
     WriterProviderBase,
     WriterProviderCapabilities,
     WriterProviderDocument,
+    WriterProviderRevisionError,
     WriterProviderWriteMode,
 )
 from ..adapter.base import NativePatchOperation, WriterAdapterBase
 from ..adapter.feishu import FeishuWriterAdapter, feishu_block_url
-from ..utils import validate_writer_tables
 from ..data_models.multimodal import MediaAssetLibrary
 from ..data_models.revision import PatchHunk, PatchResult, PatchSet
 from ..data_models.task import InputResource, TargetDocument
-from ..data_models.writer_ir import WRITER_BLOCK_MUTABLE_FIELDS, WriterBlock, WriterDocument, WriterStage
+from ..data_models.writer_ir import WriterBlock, WriterDocument, WriterStage
 from ..numbering import (
     build_numbering_view_from_ir,
     compute_numbering,
     format_target_number,
     materialize_ir,
 )
-from ..tools.revision_tools import apply_patch_to_ir
+from ..tools.revision_tools import apply_patch_to_ir, apply_persisted_patch_hunk
 from ..utils import strip_caption_numbering, strip_heading_numbering
 
 
@@ -70,6 +70,7 @@ class FeishuWriterProvider(WriterProviderBase):
     ) -> dict:
         protocol, real_path, fs, adapter, locator, external_document_id = \
             self._resolve_document_target(target)
+        metadata = self._document_metadata(fs, real_path)
         if not hasattr(fs, 'get_doc_blocks'):
             raise TypeError(f'{type(fs).__name__} does not support structured document reads.')
         raw_blocks = fs.get_doc_blocks(real_path, with_descendants=True) or []
@@ -77,21 +78,26 @@ class FeishuWriterProvider(WriterProviderBase):
             raw_blocks,
             external_document_id=external_document_id,
             stage=stage,
-            title=target.title or '',
+            title=target.title or str(metadata.get('title') or ''),
             uri=locator,
-            revision=None,
+            revision=str(metadata['revision_id']),
         )
         if previous_document is not None:
             document = adapter.merge_refreshed_document(previous_document, document)
         document.metadata.update({
             'block_count': len(raw_blocks),
             'source': target.model_dump(),
+            'provider_metadata': metadata,
         })
         resolved_target = target.model_copy(deep=True)
         resolved_target.doc_id = external_document_id
         resolved_target.uri = locator
         resolved_target.adapter = protocol
         resolved_target.title = document.title or target.title
+        resolved_target.meta = {
+            **resolved_target.meta,
+            'revision_id': metadata['revision_id'],
+        }
         return {
             'representation': 'ir',
             'source_document': document,
@@ -256,8 +262,13 @@ class FeishuWriterProvider(WriterProviderBase):
         if converted.provider != self.provider or converted.format != 'feishu_blocks':
             raise ValueError('Feishu write_document requires converted Feishu blocks.')
         source_document = converted.source_document.model_copy(deep=True)
-        protocol, _, fs, _, locator, document_id = \
+        protocol, real_path, fs, _, locator, document_id = \
             self._resolve_document_target(target, source_document=source_document)
+        if source_document.revision is not None:
+            current_revision = str(self._document_metadata(fs, real_path).get('revision_id'))
+            if current_revision != source_document.revision:
+                raise WriterProviderRevisionError(
+                    self.provider, source_document.revision, current_revision)
         source_document.provider_binding = {
             **source_document.provider_binding,
             'provider': protocol,
@@ -276,26 +287,38 @@ class FeishuWriterProvider(WriterProviderBase):
         if not isinstance(native_blocks, list):
             raise TypeError('Converted Feishu content must be a block list.')
         if source_document.title:
-            self._update_document_title(
+            title_result = self._update_document_title(
                 fs, document_id, source_document.title, source_document.revision,
             )
+            source_document = self._with_operation_revision(source_document, title_result)
         relations: List[dict[str, str]] = []
         if not native_blocks:
             warnings.append('Document has no publishable blocks.')
         else:
+            try:
+                revision_id = int(source_document.revision) if source_document.revision is not None else -1
+            except (TypeError, ValueError):
+                revision_id = -1
             written_blocks = write_blocks(
-                document_id, native_blocks, block_id_relations=relations)
+                document_id, native_blocks, block_id_relations=relations,
+                document_revision_id=revision_id)
         persisted_result = {}
         if relations:
             adapter = self._writer_adapter()
+            metadata = self._document_metadata(fs, real_path)
             refreshed = adapter.blocks_to_ir(
                 written_blocks, external_document_id=document_id, stage='final',
                 title=source_document.title or target.title or '', uri=locator,
+                revision=str(metadata['revision_id']),
             )
-            refreshed.metadata.update({'block_count': len(written_blocks), 'source': target.model_dump()})
+            refreshed.metadata.update({
+                'block_count': len(written_blocks),
+                'source': target.model_dump(),
+                'provider_metadata': metadata,
+            })
             persisted_result = {
                 'representation': 'ir',
-                'persisted_document': adapter._bind_written_document(source_document, relations, refreshed),
+                'persisted_document': adapter.bind_written_document(source_document, relations, refreshed),
             }
         return {
             **persisted_result,
@@ -324,6 +347,11 @@ class FeishuWriterProvider(WriterProviderBase):
 
         protocol, real_path, fs, adapter, locator, document_id = \
             self._resolve_document_target(target, source_document=source_document)
+        metadata = self._document_metadata(fs, real_path)
+        current_revision = str(metadata['revision_id'])
+        if source_document.revision is not None and current_revision != source_document.revision:
+            raise WriterProviderRevisionError(
+                self.provider, source_document.revision, current_revision)
         revised_document, _ = apply_patch_to_ir(
             source_document, patch_set, media_assets=media_assets)
         final_numbering = compute_numbering(build_numbering_view_from_ir(revised_document))
@@ -469,7 +497,6 @@ class FeishuWriterProvider(WriterProviderBase):
                 document_id=document_id,
                 document_uri=locator,
             )
-            FeishuWriterProvider._apply_local_operation(persisted_document, sync_hunk)
             operation = adapter.patch_to_operation(
                 sync_hunk, persisted_document, media_assets=media_assets)
             operation_result = self._execute_native_operation(
@@ -523,42 +550,6 @@ class FeishuWriterProvider(WriterProviderBase):
             return document
         return document.model_copy(update={'revision': str(revision)})
 
-    @staticmethod
-    def _apply_local_operation(document: WriterDocument, patch: PatchHunk) -> WriterDocument:
-        # Synchronize an executed operation; never reapply model revision policy here.
-        patch = PatchSet(target_doc_id=document.document_id, hunks=[patch]).hunks[0]
-        validate_writer_tables(document)
-        updated = document.model_copy(deep=True)
-        updated.ui_editable = False
-        target = updated.block_by_id(patch.target_node_id)
-        if patch.modify_type != 'create' and target is None:
-            raise ValueError(f'patch target node does not exist: {patch.target_node_id!r}.')
-        if patch.modify_type == 'update':
-            # Keep the latest bindings/payloads: the patch may predate an earlier ID replacement.
-            for field in WRITER_BLOCK_MUTABLE_FIELDS:
-                setattr(target, field, deepcopy(getattr(patch.block, field)))
-        else:
-            if patch.modify_type in {'delete', 'move'}:
-                if patch.modify_type == 'move' and any(
-                    item.node_id == patch.parent_node_id for item in target.iter_blocks()
-                ):
-                    raise ValueError('move target cannot be moved into its own subtree.')
-                siblings = [updated.blocks, *(item.children for item in updated.iter_blocks())]
-                next(items for items in siblings if any(item is target for item in items)).remove(target)
-            if patch.modify_type in {'create', 'move'}:
-                parent = updated.block_by_id(patch.parent_node_id) if patch.parent_node_id else None
-                if patch.parent_node_id and parent is None:
-                    raise ValueError(f'parent block {patch.parent_node_id!r} is absent from document.')
-                children = parent.children if parent is not None else updated.blocks
-                if patch.index is None or not 0 <= patch.index <= len(children):
-                    raise ValueError(f'{patch.modify_type} index is outside its parent.')
-                children.insert(patch.index, patch.block.model_copy(deep=True) if patch.modify_type == 'create' else target)
-        node_ids = [item.node_id for item in updated.iter_blocks()]
-        if len(node_ids) != len(set(node_ids)):
-            raise ValueError('operation produced duplicate node_ids.')
-        validate_writer_tables(updated)
-        return WriterDocument.model_validate(updated.model_dump())
-
     @classmethod
     def _apply_operation_result_locally(
         cls,
@@ -575,29 +566,23 @@ class FeishuWriterProvider(WriterProviderBase):
             for block in document.iter_blocks()
             if isinstance(block.provider_binding.get('block_id'), str)
         }
-        updated = FeishuWriterProvider._apply_local_operation(document, patch)
+        updated = apply_persisted_patch_hunk(document, patch)
 
         updated = cls._with_operation_revision(updated, operation_result)
 
         if operation.operation == 'create':
-            relations = operation_result.get('block_id_relations') \
+            bindings = operation_result.get('node_id_bindings') \
                 if isinstance(operation_result, dict) else None
-            if not isinstance(relations, list) or not relations:
-                raise ValueError('create operation did not return Feishu block ID relations.')
-            relation_map = {
-                relation.get('temporary_block_id'): relation.get('block_id')
-                for relation in relations
-                if isinstance(relation, dict)
-                and isinstance(relation.get('temporary_block_id'), str)
-                and isinstance(relation.get('block_id'), str)
-            }
-            descendants = operation.params.get('descendants')
+            if not isinstance(bindings, dict) or not bindings:
+                raise ValueError('create operation did not return Feishu node ID bindings.')
+            relation_map = bindings
+            native_blocks = operation.params.get('blocks')
             native_by_temporary_id = {
                 block.get('block_id'): block
-                for block in descendants
-                if isinstance(descendants, list) and isinstance(block, dict)
+                for block in native_blocks
+                if isinstance(native_blocks, list) and isinstance(block, dict)
                 and isinstance(block.get('block_id'), str)
-            } if isinstance(descendants, list) else {}
+            } if isinstance(native_blocks, list) else {}
             if any(not relation_map.get(node_id) for node_id in native_by_temporary_id):
                 raise ValueError('Feishu create returned incomplete block ID relations.')
             if len(set(relation_map.values())) != len(relation_map):
@@ -634,11 +619,11 @@ class FeishuWriterProvider(WriterProviderBase):
                 root.provider_binding['parent_block_id'] = operation.params['parent_block_id']
 
         elif operation.operation in {'move', 'replace'}:
-            relations = operation_result.get('block_id_relations') \
+            provider_id_remap = operation_result.get('provider_id_remap') \
                 if isinstance(operation_result, dict) else None
-            if not isinstance(relations, dict) or not relations:
+            if not isinstance(provider_id_remap, dict) or not provider_id_remap:
                 raise ValueError(
-                    f'{operation.operation} operation did not return Feishu block ID relations.')
+                    f'{operation.operation} operation did not return Feishu provider ID remap.')
             # Native cell text blocks are folded into payloads rather than IR children.
             physical_ids = set(previous_by_block_id)
             for item in document.iter_blocks():
@@ -650,16 +635,17 @@ class FeishuWriterProvider(WriterProviderBase):
                 if caption_id:
                     physical_ids.add(caption_id)
             if any(source_id not in physical_ids or not isinstance(created_id, str)
-                   for source_id, created_id in relations.items()):
-                raise ValueError(f'{operation.operation} block ID relations do not match local IR.')
+                   for source_id, created_id in provider_id_remap.items()):
+                raise ValueError(f'{operation.operation} provider ID remap does not match local IR.')
             previous_root = document.block_by_id(patch.target_node_id)
             required_ids = {
                 item.provider_binding['block_id'] for item in previous_root.iter_blocks()
                 if item.provider_binding.get('block_id')
             }
-            if not required_ids.issubset(relations) or any(not value for value in relations.values()):
-                raise ValueError(f'{operation.operation} returned incomplete Feishu block ID relations.')
-            if len(set(relations.values())) != len(relations):
+            if not required_ids.issubset(provider_id_remap) \
+                    or any(not value for value in provider_id_remap.values()):
+                raise ValueError(f'{operation.operation} returned an incomplete Feishu provider ID remap.')
+            if len(set(provider_id_remap.values())) != len(provider_id_remap):
                 raise ValueError(f'{operation.operation} returned duplicate Feishu block IDs.')
 
             def remap(value: Any, key: str = '') -> Any:
@@ -670,7 +656,7 @@ class FeishuWriterProvider(WriterProviderBase):
                 if isinstance(value, str) and key in {
                     'block_id', 'parent_block_id', 'parent_id', 'children', 'cells',
                 }:
-                    return relations.get(value, value)
+                    return provider_id_remap.get(value, value)
                 return value
 
             for block in updated.iter_blocks():
@@ -685,7 +671,7 @@ class FeishuWriterProvider(WriterProviderBase):
                         replacement['children'] = deepcopy(children)
                     cls._bind_local_feishu_block(
                         root, root.provider_binding['block_id'],
-                        replacement, relations, {})
+                        replacement, provider_id_remap, {})
             root = updated.block_by_id(patch.target_node_id)
             if root is not None:
                 parent_key = 'target_parent_block_id' \
@@ -800,6 +786,19 @@ class FeishuWriterProvider(WriterProviderBase):
         return adapter
 
     @staticmethod
+    def _document_metadata(fs: Any, path: str) -> Dict[str, Any]:
+        method = getattr(fs, 'get_document_metadata', None)
+        if not callable(method):
+            raise TypeError(f'{type(fs).__name__} does not support get_document_metadata().')
+        metadata = method(path)
+        if not isinstance(metadata, dict):
+            raise TypeError('FeishuFS.get_document_metadata() must return a dict.')
+        revision_id = metadata.get('revision_id')
+        if not isinstance(revision_id, int) or isinstance(revision_id, bool):
+            raise ValueError('Feishu document metadata must contain an integer revision_id.')
+        return metadata
+
+    @staticmethod
     def _validate_available_images(
         document: WriterDocument,
         media_assets: Optional[MediaAssetLibrary],
@@ -897,6 +896,17 @@ class FeishuWriterProvider(WriterProviderBase):
             except (TypeError, ValueError):
                 params['document_revision_id'] = -1
         result = method(**params)
+        temporary_bindings = result.pop('block_id_relations', None)
+        if temporary_bindings is not None:
+            result['node_id_bindings'] = {
+                relation['temporary_block_id']: relation['block_id']
+                for relation in temporary_bindings
+                if isinstance(relation, dict)
+                and isinstance(relation.get('temporary_block_id'), str)
+                and relation.get('temporary_block_id')
+                and isinstance(relation.get('block_id'), str)
+                and relation.get('block_id')
+            }
         if caption_operation is not None:
             next_revision = result.get('document_revision_id', revision)
             try:
@@ -907,9 +917,13 @@ class FeishuWriterProvider(WriterProviderBase):
                 ) from exc
             result = {
                 **result, **extra,
-                'block_id_relations': {
-                    **(result.get('block_id_relations') or {}),
-                    **(extra.get('block_id_relations') or {}),
+                'node_id_bindings': {
+                    **(result.get('node_id_bindings') or {}),
+                    **(extra.get('node_id_bindings') or {}),
+                },
+                'provider_id_remap': {
+                    **(result.get('provider_id_remap') or {}),
+                    **(extra.get('provider_id_remap') or {}),
                 },
             }
         return result
@@ -927,18 +941,20 @@ class FeishuWriterProvider(WriterProviderBase):
         if not hasattr(fs, 'get_doc_blocks'):
             raise TypeError(f'{type(fs).__name__} does not support structured document reads.')
         latest_blocks = fs.get_doc_blocks(real_path, with_descendants=True) or []
+        metadata = FeishuWriterProvider._document_metadata(fs, real_path)
         document = adapter.blocks_to_ir(
             latest_blocks,
             external_document_id=document_id,
             stage=source_document.stage,
             title=source_document.title,
             uri=locator,
-            revision=source_document.revision,
+            revision=str(metadata['revision_id']),
         )
         document.metadata = {
             **deepcopy(source_document.metadata),
             'block_count': len(latest_blocks),
             'source': source_document.metadata.get('source', {}),
+            'provider_metadata': metadata,
         }
         return document
 

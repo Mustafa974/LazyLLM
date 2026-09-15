@@ -1,7 +1,10 @@
 from copy import deepcopy
 from unittest.mock import MagicMock
 
+import pytest
+
 from lazyllm.tools.writer.adapter.feishu import FeishuWriterAdapter
+from lazyllm.tools.writer.adapter.base import WriterAdapterBase
 from lazyllm.tools.writer.data_models import (
     MediaAsset,
     MediaAssetLibrary,
@@ -14,9 +17,44 @@ from lazyllm.tools.writer.data_models import (
 )
 from lazyllm.tools.writer.tools import WriterResourceTools
 from lazyllm.tools.writer.utils import load_artifact_json, parse_document_markdown
-from lazyllm.tools.writer.utils.feishu_docx import prepare_docx_clone_descendants
+from lazyllm.tools.fs.supplier.feishu import prepare_docx_clone_descendants
 from lazyllm.tools.writer.provider.obsidian import ObsidianWriterProvider
 from lazyllm.tools.writer.provider.feishu import FeishuWriterProvider
+from lazyllm.tools.writer.provider.base import WriterProviderRevisionError
+
+
+class _CaptionlessAdapter(WriterAdapterBase):
+    provider = 'captionless'
+
+    def blocks_to_ir(self, blocks, *, external_document_id, stage='final',
+                     title='', uri=None, revision=None):
+        raise NotImplementedError
+
+    def ir_to_blocks(self, document, media_assets=None):
+        raise NotImplementedError
+
+    def patch_to_operation(self, patch, document, media_assets=None):
+        raise NotImplementedError
+
+    def merge_refreshed_document(self, previous_document, refreshed_document, **kwargs):
+        return previous_document
+
+
+def test_bind_written_document_does_not_require_materialized_table_captions():
+    source = WriterDocument(
+        document_id='document-1',
+        blocks=[WriterBlock(node_id='node-1', type='paragraph', content='text')],
+    )
+    bound = _CaptionlessAdapter().bind_written_document(
+        source,
+        [{'temporary_block_id': 'node-1', 'block_id': 'provider-block-1'}],
+        source.model_copy(deep=True),
+    )
+
+    assert bound.blocks[0].provider_binding == {
+        'provider': 'captionless',
+        'block_id': 'provider-block-1',
+    }
 
 
 def _block(block_id, content, *, parent='doc-1', children=None, heading=False):
@@ -153,7 +191,7 @@ def test_create_and_delete_build_native_operations():
     ), document)
     assert create.operation == 'create'
     assert (create.params['parent_block_id'], create.params['index']) == ('doc-1', 1)
-    assert create.params['descendants'][0]['text']['elements'][0][
+    assert create.params['blocks'][0]['text']['elements'][0][
         'text_run']['text_element_style'] == {'bold': True}
 
     delete = adapter.patch_to_operation(PatchHunk(
@@ -198,8 +236,8 @@ def test_image_create_operation_carries_private_media_binding_metadata(tmp_path)
         index=1,
     ), document, media_assets=media_assets)
 
-    assert operation.params['descendants'][0]['block_type'] == 27
-    assert operation.params['descendants'][0]['_media']['media_asset_id'] == 'asset-1'
+    assert operation.params['blocks'][0]['block_type'] == 27
+    assert operation.params['blocks'][0]['_media']['media_asset_id'] == 'asset-1'
 
 
 def test_update_maps_styles_and_block_type_changes():
@@ -358,7 +396,7 @@ def test_merge_refreshed_move_restores_writer_identity():
         patch=patch,
         operation=operation,
         operation_result={
-            'block_id_relations': {
+            'provider_id_remap': {
                 'heading-1': 'moved-heading',
                 'paragraph-1': 'moved-paragraph',
             },
@@ -451,7 +489,7 @@ def _cell_batch_setup():
     fs = MagicMock()
     fs.update_block.side_effect = [{'document_revision_id': value} for value in range(11, 30)]
     instance._resolve_document_target = MagicMock(return_value=('feishu', '/doc', fs, adapter, '/doc', 'doc'))
-    instance._document_metadata = MagicMock(return_value={'last_edited_time': '10'})
+    instance._document_metadata = MagicMock(return_value={'revision_id': 10})
     instance._read_persisted_document = MagicMock(side_effect=lambda **kw: kw['source_document'].model_copy(deep=True))
     return (instance, fs, document)
 
@@ -460,6 +498,34 @@ def _cell_edit(document, node_id, value, hunk_id=None):
     return PatchHunk(hunk_id=hunk_id or f'edit-{node_id}', target_node_id=node_id, modify_type='update',
         block=document.block_by_id(node_id).model_copy(update={'content': value, 'spans': [WriterSpan(text=value,
         style={'bold': True})]}))
+
+
+def test_feishu_load_document_records_remote_revision():
+    provider = FeishuWriterProvider()
+    fs = MagicMock()
+    fs.get_document_metadata.return_value = {'revision_id': 12, 'title': 'Project'}
+    fs.get_doc_blocks.return_value = [_block('paragraph', 'content')]
+    provider._resolve_document_target = MagicMock(return_value=(
+        'feishu', '/project', fs, FeishuWriterAdapter(), 'feishu:/project', 'doc-1',
+    ))
+
+    result = provider.load_document(TargetDocument(uri='feishu:/project', adapter='feishu'))
+
+    assert result['source_document'].revision == '12'
+    assert result['source_document'].title == 'Project'
+    assert result['target_document'].meta['revision_id'] == 12
+
+
+def test_feishu_patch_rejects_a_stale_loaded_revision_before_writing():
+    provider, fs, document = _cell_batch_setup()
+    provider._document_metadata.return_value = {'revision_id': 11}
+
+    with pytest.raises(WriterProviderRevisionError) as exc_info:
+        _apply_cell_hunks(provider, document, [_cell_edit(document, 'cell-0-0', 'new')])
+
+    assert exc_info.value.expected == '10'
+    assert exc_info.value.actual == '11'
+    fs.update_block.assert_not_called()
 
 
 def _apply_cell_hunks(instance, document, hunks):
@@ -491,7 +557,7 @@ def test_feishu_move_flushes_cells_and_following_batch_uses_new_ids():
     ids = ['table'] + [f'cell-{r}-{c}' for r in range(2) for c in range(2)]
     ids += [f'text-{r}-{c}' for r in range(2) for c in range(2)]
     relations = {key: key + '-moved' for key in ids}
-    fs.move_block.return_value = {'block_id_relations': relations, 'document_revision_id': 20}
+    fs.move_block.return_value = {'provider_id_remap': relations, 'document_revision_id': 20}
     _apply_cell_hunks(instance, document, [_cell_edit(document, 'cell-0-0', 'before'), PatchHunk(hunk_id='move',
         target_node_id='table', modify_type='move', index=1), _cell_edit(document, 'cell-0-1', 'after')])
     assert [call[0] for call in fs.method_calls] == ['update_block', 'move_block', 'update_block']

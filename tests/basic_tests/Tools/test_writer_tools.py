@@ -347,6 +347,13 @@ def _make_doc_adapter():
     }
     adapter.read_bytes.return_value = '第一段\n第二段'.encode('utf-8')
     adapter.get_document_id.return_value = 'doc-1'
+    adapter.get_document_metadata.side_effect = lambda _path: {
+        'document_id': 'doc-1',
+        'title': '飞书文档',
+        'revision_id': (
+            12 + adapter.update_block.call_count + adapter.move_block.call_count
+        ),
+    }
     adapter.get_doc_blocks.return_value = [
         {
             'block_id': 'b1',
@@ -1806,7 +1813,7 @@ def test_apply_patch_to_document_moves_and_restores_writer_identity():
         moved['heading1']['elements'][0]['text_run']['content'] = '1 新标题'
         fs.get_doc_blocks.return_value = [second, moved]
         fs.move_block.return_value = {
-            'block_id_relations': {'b1': 'moved-b1'},
+            'provider_id_remap': {'b1': 'moved-b1'},
             'document_revision_id': 13,
         }
         fs.update_block.return_value = {'document_revision_id': 14}

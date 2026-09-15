@@ -16,7 +16,8 @@ from ..data_models.writer_ir import (
     WriterStage,
 )
 from ..utils import (
-    strip_caption_numbering, strip_heading_numbering, table_grid, validate_writer_tables,
+    strip_caption_numbering, strip_heading_numbering, strip_math_delimiters,
+    table_grid, validate_writer_tables,
 )
 from .base import NativeBlock, NativePatchOperation, WriterAdapterBase
 
@@ -39,19 +40,20 @@ _EDITABLE_TEXT_TYPES = {
 
 _RICH_TEXT_BLOCK_TYPES = _EDITABLE_TEXT_TYPES
 _CAPTION_BLOCK_TYPES = {'image'}
-# Notion code.language enum (including values returned by API validation).
+# Notion code.language values accepted for writes. Keep this in sync with the
+# documented enum and fall back conservatively when reading newer values.
 # https://developers.notion.com/reference/block#code
-_CODE_LANGUAGES = frozenset({
-    'abap', 'abc', 'agda', 'arduino', 'ascii art', 'assembly', 'bash', 'basic', 'bnf',
-    'c', 'c#', 'c++', 'clojure', 'coffeescript', 'coq', 'css', 'dart', 'dhall', 'diff',
-    'docker', 'ebnf', 'elixir', 'elm', 'erlang', 'f#', 'flow', 'fortran', 'gherkin',
-    'glsl', 'go', 'graphql', 'groovy', 'haskell', 'hcl', 'html', 'idris', 'java',
-    'javascript', 'json', 'julia', 'kotlin', 'latex', 'less', 'lisp', 'livescript',
-    'llvm ir', 'lua', 'makefile', 'markdown', 'markup', 'matlab', 'mathematica',
-    'mermaid', 'nix', 'notion formula', 'objective-c', 'ocaml', 'pascal', 'perl',
-    'php', 'plain text', 'powershell', 'prolog', 'protobuf', 'purescript', 'python',
-    'r', 'racket', 'reason', 'ruby', 'rust', 'sass', 'scala', 'scheme', 'scss',
-    'shell', 'smalltalk', 'solidity', 'sql', 'swift', 'toml', 'typescript', 'vb.net',
+_WRITABLE_CODE_LANGUAGES = frozenset({
+    'abap', 'arduino', 'bash', 'basic', 'c', 'c#', 'c++', 'clojure',
+    'coffeescript', 'css', 'dart', 'diff', 'docker', 'elixir', 'elm', 'erlang',
+    'f#', 'flow', 'fortran', 'gherkin', 'glsl', 'go', 'graphql', 'groovy',
+    'haskell', 'html', 'java', 'javascript', 'json', 'julia', 'kotlin', 'latex',
+    'less', 'lisp', 'livescript', 'lua', 'makefile', 'markdown', 'markup',
+    'matlab', 'mermaid', 'nix', 'objective-c', 'ocaml', 'pascal', 'perl', 'php',
+    'plain text', 'powershell', 'prolog', 'protobuf', 'python', 'r', 'reason',
+    'ruby', 'rust', 'sass', 'scala', 'scheme', 'scss', 'shell', 'sql', 'swift',
+    'typescript', 'vb.net', 'verilog', 'vhdl', 'visual basic', 'webassembly',
+    'xml', 'yaml', 'java/c/c++/c#',
     'verilog', 'vhdl', 'visual basic', 'webassembly', 'xml', 'yaml', 'java/c/c++/c#',
 })
 _IR_TO_BLOCK_TYPE = {
@@ -68,11 +70,6 @@ _IR_TO_BLOCK_TYPE = {
     'link_preview': 'link_preview',
     'grid': 'column_list',
     'grid_column': 'column',
-}
-_READ_ONLY_BLOCK_FIELDS = {
-    'id', 'block_id', 'object', 'parent', 'parent_id', 'created_time',
-    'last_edited_time', 'created_by', 'last_edited_by', 'archived',
-    'in_trash', 'has_children', 'block_type', 'plain_text',
 }
 _ANNOTATION_STYLES = {
     'bold': 'bold',
@@ -92,99 +89,7 @@ _UUID_FRAGMENT_RE = re.compile(
 
 class NotionWriterAdapter(WriterAdapterBase):
     provider = 'notion'
-
-    @staticmethod
-    def _table_caption_block(table: WriterBlock) -> Optional[WriterBlock]:
-        if table.type != 'table' or not table.content.strip():
-            return None
-        return WriterBlock(
-            node_id=f'{table.node_id}::caption', type='paragraph',
-            content=table.content, spans=deepcopy(table.spans) or [WriterSpan(text=table.content)],
-            stage=table.stage,
-        )
-
-    @staticmethod
-    def _caption_binding(table: WriterBlock) -> Dict[str, Any]:
-        caption = table.provider_payload.get('table_caption') if table.type == 'table' else None
-        binding = caption.get('provider_binding') if isinstance(caption, dict) else None
-        return binding if isinstance(binding, dict) else {}
-
-    @classmethod
-    def _physical_index(cls, blocks: List[WriterBlock], index: int) -> int:
-        return index + sum(bool(cls._caption_binding(block).get('block_id')) for block in blocks[:index])
-
-    @classmethod
-    def _restore_known_table_captions(
-        cls, previous: WriterDocument, refreshed: WriterDocument,
-    ) -> WriterDocument:
-        if previous.provider_binding.get('document_id') != refreshed.provider_binding.get('document_id'):
-            return refreshed
-        known = {
-            block.provider_binding.get('block_id'): cls._caption_binding(block).get('block_id')
-            for block in previous.iter_blocks() if block.type == 'table'
-        }
-
-        def restore(blocks: List[WriterBlock]) -> List[WriterBlock]:
-            output: List[WriterBlock] = []
-            for block in blocks:
-                block.children = restore(block.children)
-                if block.type == 'table':
-                    block.provider_payload.pop('table_caption', None)
-                    expected = known.get(block.provider_binding.get('block_id'))
-                    caption = output[-1] if output else None
-                    if expected and caption is not None and caption.type == 'paragraph' \
-                            and caption.provider_binding.get('block_id') == expected \
-                            and caption.provider_binding.get('parent_block_id') == \
-                            block.provider_binding.get('parent_block_id'):
-                        output.pop()
-                        block.editable = True
-                        block.content = strip_caption_numbering(caption.content)
-                        block.spans = deepcopy(caption.spans)
-                        # Remove only the numbering prefix; retain inline formatting.
-                        prefix = caption.content.find(block.content) if block.content else len(caption.content)
-                        while prefix > 0 and block.spans:
-                            span = block.spans[0]
-                            removed = min(prefix, len(span.text))
-                            span.text = span.text[removed:]
-                            prefix -= removed
-                            if not span.text:
-                                block.spans.pop(0)
-                        if block.spans:
-                            block.spans[-1].text = block.spans[-1].text.rstrip()
-                        if ''.join(span.text for span in block.spans) != block.content:
-                            block.spans = [WriterSpan(text=block.content)] if block.content else []
-                        block.provider_payload['table_caption'] = {
-                            'content': caption.content,
-                            'spans': [span.model_dump() for span in caption.spans],
-                            'provider_binding': deepcopy(caption.provider_binding),
-                            'provider_payload': deepcopy(caption.provider_payload),
-                        }
-                output.append(block)
-            return output
-
-        refreshed.blocks = restore(refreshed.blocks)
-        return refreshed
-
-    @staticmethod
-    def _restore_table_node_ids(previous: WriterDocument, refreshed: WriterDocument) -> None:
-        previous_by_id = {block.node_id: block for block in previous.iter_blocks()}
-        for table in refreshed.iter_blocks():
-            old_table = previous_by_id.get(table.node_id)
-            if table.type != 'table' or old_table is None or old_table.type != 'table':
-                continue
-            if len(table.children) != len(old_table.children):
-                continue
-            for row, old_row in zip(table.children, old_table.children):
-                if len(row.children) != len(old_row.children):
-                    continue
-                if not row.provider_binding.get('block_id'):
-                    if [cell.node_id for cell in row.children] == [cell.node_id for cell in old_row.children]:
-                        row.node_id = old_row.node_id
-                elif row.node_id == old_row.node_id:
-                    for cell, old_cell in zip(row.children, old_row.children):
-                        if not cell.provider_binding.get('block_id'):
-                            cell.node_id = old_cell.node_id
-                            cell.references = deepcopy(old_cell.references)
+    materializes_table_captions = True
 
     def _table_patch_to_operation(
         self, patch: PatchHunk, document: WriterDocument, media_assets: Any = None,
@@ -238,96 +143,6 @@ class NotionWriterAdapter(WriterAdapterBase):
                     caption_params['block'] = raw
                     params['_caption_operation'] = NativePatchOperation('move', caption_params)
         return operation
-
-    def _bound_caption_block(self, table: WriterBlock) -> WriterBlock:
-        saved = table.provider_payload.get('table_caption') or {}
-        caption_spans = [WriterSpan.model_validate(span) for span in saved['spans']] \
-            if 'spans' in saved else deepcopy(table.spans)
-        content = saved.get('content', table.content)
-        if ''.join(span.text for span in caption_spans) != content:
-            caption_spans = [WriterSpan(text=content)] if content else []
-        return WriterBlock(
-            node_id=f'{table.node_id}::caption', type='paragraph',
-            content=saved.get('content', table.content), stage=table.stage,
-            spans=caption_spans,
-            provider_binding=deepcopy(self._caption_binding(table)),
-            provider_payload=deepcopy(saved.get('provider_payload') or {
-                'raw_block': saved.get('raw_block') or {},
-            }),
-        )
-
-    def _table_caption_update(
-        self, patch: PatchHunk, document: WriterDocument, current: WriterBlock, media_assets: Any,
-    ) -> NativePatchOperation:
-        desired = patch.block
-        def grid_snapshot(block: WriterBlock) -> List[Dict[str, Any]]:
-            return [{
-                **child.model_dump(exclude={'provider_binding', 'provider_payload', 'editable', 'children'}),
-                'children': grid_snapshot(child),
-            } for child in block.children]
-
-        if desired is None or desired.type != 'table' or grid_snapshot(desired) != grid_snapshot(current):
-            raise ValueError('Table updates must keep the grid; update individual table cells separately.')
-        caption = self._bound_caption_block(current)
-        _, parent, index = self._block_location(document, current.node_id)
-        siblings = parent.children if parent else document.blocks
-        native_index = self._physical_index(siblings, index)
-        caption_document = document.model_copy(deep=True)
-        caption_document.blocks = [caption]
-        if self._caption_binding(current).get('block_id'):
-            caption_patch = PatchHunk(
-                target_node_id=caption.node_id, modify_type='update' if desired.content.strip() else 'delete',
-                block=caption.model_copy(update={'content': desired.content, 'spans': deepcopy(desired.spans)})
-                if desired.content.strip() else None,
-            )
-            operation = self._patch_to_operation(caption_patch, caption_document, media_assets)
-            if operation.operation == 'delete' and self.provider == 'feishu':
-                operation.params.update(start_index=native_index, end_index=native_index + 1)
-            return operation
-        if not desired.content.strip():
-            raise ValueError('Table has no bound caption to update.')
-        caption = self._table_caption_block(desired)
-        operation = self._patch_to_operation(PatchHunk(
-            target_node_id=caption.node_id, modify_type='create', block=caption,
-            parent_node_id=patch.parent_node_id, index=0,
-        ), document, media_assets)
-        operation.params['parent_block_id'] = current.provider_binding.get('parent_block_id') or \
-            document.provider_binding['document_id']
-        operation.params['index'] = native_index
-        return operation
-
-    @staticmethod
-    def _update_local_caption(document: WriterDocument, patch: PatchHunk) -> None:
-        if patch.modify_type != 'update' or patch.block is None or patch.block.type != 'table':
-            return
-        table = document.block_by_id(patch.target_node_id)
-        if table is None:
-            return
-        if not patch.block.content.strip():
-            table.provider_payload.pop('table_caption', None)
-        elif 'table_caption' in table.provider_payload:
-            table.provider_payload['table_caption']['content'] = patch.block.content
-            table.provider_payload['table_caption']['spans'] = [span.model_dump() for span in patch.block.spans]
-
-    def _bind_written_document(
-        self, source: WriterDocument, relations: List[Dict[str, str]], refreshed: WriterDocument,
-    ) -> WriterDocument:
-        source = source.model_copy(deep=True)
-        mapping = {item['temporary_block_id']: item['block_id'] for item in relations}
-        for block in source.iter_blocks():
-            temporary_id = block.node_id
-            block.provider_binding = {'provider': self.provider}
-            if mapping.get(temporary_id):
-                block.provider_binding['block_id'] = mapping[temporary_id]
-            if block.type == 'table':
-                block.provider_payload.pop('table_caption', None)
-                caption_id = mapping.get(f'{temporary_id}::caption')
-                if caption_id and mapping.get(temporary_id):
-                    block.provider_payload['table_caption'] = {
-                        'provider_binding': {'provider': self.provider, 'block_id': caption_id},
-                    }
-        return self.merge_refreshed_document(source, refreshed)
-
 
     def blocks_to_ir(self, blocks: List[NativeBlock], *, external_document_id: str,
                      stage: WriterStage = 'final', title: str = '', uri: Optional[str] = None,
@@ -527,7 +342,7 @@ class NotionWriterAdapter(WriterAdapterBase):
                 raise ValueError('notion_unknown blocks must remain read-only.')
             if not block_type:
                 raise ValueError('notion_unknown block does not preserve its Notion type.')
-            output = self._writable_raw_block(raw, block_type)
+            output = deepcopy(raw)
         else:
             payload = deepcopy(
                 raw.get(block_type)
@@ -541,7 +356,7 @@ class NotionWriterAdapter(WriterAdapterBase):
                 if block_type == 'code':
                     payload['language'] = self._code_language(block, payload)
             elif block_type == 'equation':
-                payload['expression'] = self._math_expression(block.content)
+                payload['expression'] = strip_math_delimiters(block.content)
             elif block_type in _CAPTION_BLOCK_TYPES:
                 payload['caption'] = self._spans_to_rich_text(block, resolve_internal_ref)
             elif block_type == 'link_preview':
@@ -597,14 +412,6 @@ class NotionWriterAdapter(WriterAdapterBase):
         return output
 
     @staticmethod
-    def _math_expression(content: str) -> str:
-        value = content.strip()
-        for left, right in [('$$', '$$'), ('\\[', '\\]'), ('\\(', '\\)'), ('$', '$')]:
-            if value.startswith(left) and value.endswith(right):
-                return value[len(left):-len(right)].strip()
-        return value
-
-    @staticmethod
     def _code_language(block: WriterBlock, payload: Dict[str, Any]) -> str:
         '''Resolve an edited IR language without losing the native round-trip value.'''
         raw_language = str(payload.get('language') or '').strip()
@@ -620,7 +427,7 @@ class NotionWriterAdapter(WriterAdapterBase):
             language = ir_language
         else:
             language = provider_language or ir_language or raw_language
-        return language if language in _CODE_LANGUAGES else 'plain text'
+        return language if language in _WRITABLE_CODE_LANGUAGES else 'plain text'
 
     @staticmethod
     def _attach_image_media(output: NativeBlock, block: WriterBlock,
@@ -655,18 +462,6 @@ class NotionWriterAdapter(WriterAdapterBase):
         return deepcopy(raw) if isinstance(raw, dict) else {}
 
     @staticmethod
-    def _writable_raw_block(raw: NativeBlock, block_type: str) -> NativeBlock:
-        output = {
-            key: deepcopy(value)
-            for key, value in raw.items()
-            if key not in _READ_ONLY_BLOCK_FIELDS
-        }
-        output['object'] = 'block'
-        output['type'] = block_type
-        output.setdefault(block_type, {})
-        return output
-
-    @staticmethod
     def _notion_type_for_ir(block: WriterBlock, original_type: str) -> str:
         if block.type == 'heading':
             level = block.numbering.get('level', 1)
@@ -699,7 +494,7 @@ class NotionWriterAdapter(WriterAdapterBase):
                 'annotations': annotations,
             }
             if rich_type == 'equation':
-                item['equation'] = {'expression': cls._math_expression(span.text)}
+                item['equation'] = {'expression': strip_math_delimiters(span.text)}
             elif rich_type == 'mention':
                 preserved = style.get(f'notion:{rich_type}')
                 if not isinstance(preserved, dict):
@@ -880,25 +675,23 @@ class NotionWriterAdapter(WriterAdapterBase):
                 block.node_id = previous.node_id
                 block.references = deepcopy(previous.references)
         if operation is not None and operation.operation in {'create', 'move'}:
-            relations = operation_result.get('block_id_relations') \
+            bindings = operation_result.get('node_id_bindings') \
                 if isinstance(operation_result, dict) else None
-            if not isinstance(relations, list) or not relations:
-                raise ValueError('create operation did not return Notion block ID relations.')
+            if not isinstance(bindings, dict) or not bindings:
+                raise ValueError(
+                    f'{operation.operation} operation did not return Notion node ID bindings.')
             refreshed_by_block_id = {
                 self._canonical_notion_id(block.provider_binding.get('block_id')): block
                 for block in refreshed_document.iter_blocks()
                 if isinstance(block.provider_binding.get('block_id'), str)
             }
             created_by_node_id: Dict[str, WriterBlock] = {}
-            for relation in relations:
-                if not isinstance(relation, dict):
-                    continue
-                temporary_id = relation.get('temporary_block_id')
-                created_id = self._canonical_notion_id(relation.get('block_id'))
+            for node_id, provider_id in bindings.items():
+                created_id = self._canonical_notion_id(provider_id)
                 created = refreshed_by_block_id.get(created_id)
-                if isinstance(temporary_id, str) and created is not None:
-                    created.node_id = temporary_id
-                    created_by_node_id[temporary_id] = created
+                if isinstance(node_id, str) and created is not None:
+                    created.node_id = node_id
+                    created_by_node_id[node_id] = created
             desired_root = None
             if patch is not None:
                 desired_root = patch.block if patch.block is not None \
@@ -911,10 +704,7 @@ class NotionWriterAdapter(WriterAdapterBase):
                     desired = desired_by_id.get(node_id)
                     if desired is not None:
                         created.references = deepcopy(desired.references)
-        self._restore_table_node_ids(previous_document, refreshed_document)
-        refreshed_document = self._restore_known_table_captions(
-            previous_document, refreshed_document,
-        )
+        refreshed_document = self._restore_table_state(previous_document, refreshed_document)
         return WriterDocument.model_validate(refreshed_document.model_dump())
 
     def _native_update_block(

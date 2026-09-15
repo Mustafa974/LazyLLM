@@ -15,6 +15,7 @@ from lazyllm.tools.writer.provider import (
     get_writer_provider,
     match_writer_provider,
 )
+from lazyllm.tools.writer.provider.base import WriterProviderRevisionError
 from lazyllm.tools.writer.tools.resource_tools import WriterResourceTools
 from lazyllm.tools.writer.utils import load_artifact_json
 
@@ -683,6 +684,27 @@ class TestNotionProvider:
         fs.replace_doc_blocks.assert_called_once()
         assert fs.replace_doc_blocks.call_args.args[0] == PAGE_ID
         assert fs.replace_doc_blocks.call_args.args[1][0]['type'] == 'paragraph'
+
+    def test_notion_provider_rejects_replace_after_remote_revision_changes(self):
+        fs = _make_fs()
+        provider = NotionWriterProvider()
+        with _route_notion(fs):
+            loaded = provider.load_document(
+                TargetDocument(uri=PAGE_URL, adapter='notion'),
+            )
+            document = loaded['source_document']
+            fs.get_document_metadata.return_value = {
+                **_metadata(),
+                'last_edited_time': '2026-08-28T08:01:00.000Z',
+            }
+            with pytest.raises(
+                WriterProviderRevisionError,
+                match='document changed since it was loaded',
+            ):
+                provider.replace_document(document, loaded['target_document'])
+
+        fs.update_page_title.assert_not_called()
+        fs.replace_doc_blocks.assert_not_called()
 
     def test_notion_provider_converts_markdown_to_ir_before_writing(self):
         pytest.importorskip('mistune')
