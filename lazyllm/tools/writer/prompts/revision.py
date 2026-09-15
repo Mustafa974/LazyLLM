@@ -109,9 +109,28 @@ Output semantics:
 - Insertions target the existing section or block being extended.
 - Reordering targets every existing block whose relative order participates in the change.
 - targets contains the relevant content_ref values copied exactly from the document candidates.
+- For deletion requests, select only candidates containing content to delete. Content mentioned
+  solely to be preserved is a constraint, not an additional target. Return each selected section
+  reference once, even when several paragraphs inside it are mentioned in the request.
 - Each target contains content_ref and a brief reason.
 - For Markdown, copy heading_path and occurrence exactly from one candidate. Never add
   node_id or placeholder_id to a Markdown heading reference.
+- The supplied candidate references are the authority for the document's heading structure.
+  Locate a paragraph by its meaning within a candidate's content, then copy that candidate's
+  content_ref unchanged. Do not append body text to heading_path to identify the paragraph.
+  Stage names, bold text, and standalone short lines inside candidate content do not create
+  additional heading levels, even when they look like headings or the request calls them sections.
+  Example: a candidate has heading_path=["Guide", "Workflow"] and its body contains the
+  standalone line "Final phase" followed by a paragraph. To revise that paragraph, return
+  ["Guide", "Workflow"], not ["Guide", "Workflow", "Final phase"]. The containing section
+  reference locates the paragraph; it does not expand the requested edit to the whole section.
+- occurrence distinguishes repeated sections with the same complete heading_path. It is not
+  a paragraph number, sentence number, or the candidate's position in the document. Never derive
+  it from "first/second paragraph". If the candidate omits occurrence, leave it omitted;
+  its default is 1. Use a different occurrence only when supplied by the selected candidate.
+  Example: one section contains two paragraphs, and the request deletes the first while retaining
+  the second. Return that section's candidate reference once; do not invent occurrence=2 for
+  the retained paragraph. Distinct supplied section occurrences remain distinct references.
 - Markdown HTML anchors, including image anchors, are source text rather than Writer IR
   node IDs. Locate an image or paragraph through its containing section candidate.
 - Plain text without headings uses content_ref.document_root=true.
@@ -137,11 +156,8 @@ Plan semantics:
   - move relocates an existing block.
 - Choose modify_type and target_scope from the requested edit, independently of the
   containing section used as content_ref. If the request only removes specified existing
-  text and preserves the rest verbatim, use delete. Deleting a sentence or phrase requires
-  target_scope="fragment", even when its containing paragraph or section remains.
-  Do not express pure fragment deletion as update or expand its scope to paragraph.
-  For example, "只删除第一句话，其他内容保持不变" requires delete + fragment;
-  "改写这一段，使其更简洁" requires update + paragraph.
+  text and preserves the rest verbatim, use delete. Determine target_scope from the complete
+  unit requested below. Do not express a pure deletion as update or expand its requested extent.
 - Choose operations that match the requested structural outcome, not merely an
   approximately similar textual result:
   - If task.query explicitly asks to delete or remove N paragraphs, sections, or
@@ -177,18 +193,30 @@ Plan semantics:
 - For Markdown, references use the containing section's heading_path and occurrence, or
   document_root=true for text without headings. Never use node_id or placeholder_id;
   HTML anchors such as <a id="block-IMAGE-2"></a> are not Writer IR node IDs.
-- For each Markdown instruction, set target_scope explicitly:
+- For each Markdown instruction, identify the requested unit and choose target_scope in this order:
   - section: the complete section, including its heading, owned anchors, body, images,
     and descendant subsections. Use only when the requested operation concerns that whole section.
   - paragraph: exactly one complete prose paragraph inside the referenced section.
+    A request to delete a complete paragraph requires paragraph even if that paragraph contains
+    only one sentence, is identified by meaning rather than a quotation, or is the section's
+    only body paragraph and its heading will remain. A prose paragraph can contain multiple
+    sentences or source lines; sentence count and physical line count do not determine its scope.
     Set locator_text to a short verbatim excerpt that identifies that paragraph. Prefer
     task.selection.text when it identifies the requested paragraph. Do not copy the whole
     long paragraph or invent a paragraph ID. Each paragraph operation has its own instruction.
     If the user describes the paragraph by meaning without quoting it, first identify the
     paragraph in the supplied document, then copy a short identifying excerpt into locator_text.
     The semantic description itself is not a verbatim locator_text.
-  - fragment: a sentence, phrase, image, or other partial content; describe the exact target
-    in instruction while retaining the containing section's content_ref.
+  - fragment: part of a prose paragraph, such as a sentence or phrase, or an image or other
+    non-prose fragment. Describe the exact target in instruction, retain the containing section's
+    content_ref, and set locator_text=null. A complete paragraph is not a fragment merely because
+    it occupies only part of a section or the user did not quote its opening words.
+  Set target_scope explicitly. Before returning, check that it agrees with the unit described
+  in instruction: deleting a complete paragraph must not be labeled fragment.
+  Examples: "删除这个只有一句话的完整段落" requires delete + paragraph;
+  "删除多句段落中的第二句" requires delete + fragment;
+  "删除正文段落，保留所属标题" requires delete + paragraph;
+  "改写这一段，使其更简洁" requires update + paragraph.
   The presence of delete and heading_path alone does not imply section scope.
 - A section delete already removes its contained paragraphs, images, and subsections.
   Do not add separate delete instructions for content already covered by that section delete.
@@ -197,8 +225,12 @@ Plan semantics:
   position identify its destination. Move must provide both destination_ref and position.
 - instruction describes the complete visible result of the operation.
 - For a pure deletion, instruction specifies the exact target and boundaries and requires
-  all other content to remain unchanged. Do not copy the retained paragraph or section
-  into instruction. The containing section reference is a locator, not the deletion range.
+  all other content to remain unchanged. Describe preservation constraints briefly instead of
+  copying retained sentences, paragraphs, or sections into instruction. For a complete paragraph,
+  use its short locator_text and request deletion of the whole paragraph rather than quoting it
+  in full. For a sentence or phrase, quote only the deletion target when exact text is needed;
+  describe retained neighbors by position or role. The containing section reference only locates
+  the operation; it does not determine the deletion range.
 - Preserve existing cross-reference links. Do not plan to remove or rewrite an
   internal reference unless the user asks to change it or it belongs to content being deleted.
   An image deletion may also remove its owned anchor and the corresponding prose link.
@@ -253,13 +285,22 @@ Output semantics:
 - content_ref uses heading_path and occurrence to identify the affected Markdown section.
 - Plain text without headings uses content_ref.document_root=true.
 - Update replaces the selected content, and create inserts content before or after its content_ref.
-- Delete removes exactly the requested content. For a pure sentence or phrase deletion
-  whose target is unique within content_ref, old_string must contain only the exact text
-  to delete and new_string must be "". Do not include or reproduce neighboring retained text.
-  Only when repeated text requires disambiguation, include the smallest necessary surrounding
-  context in old_string and preserve that context verbatim in new_string.
-  Example: from "第一句。第二句。第三句。", deleting only the first sentence produces
-  old_string="第一句。", new_string=""; the remaining sentences are not part of the replacement.
+- Delete removes exactly the requested content. For each pure sentence or phrase deletion:
+  1. Extract the exact deletion target from the supplied Markdown, excluding retained neighbors.
+  2. Check whether that target occurs once within content_ref. If it does, return exactly one
+     replacement for this target with old_string equal to the target and new_string="".
+  3. Only when the target actually repeats and needs disambiguation, include the smallest
+     necessary surrounding context in old_string and preserve that context verbatim in new_string.
+  4. Before returning, check whether old_string/new_string repeat any retained prefix or suffix.
+     Remove unnecessary shared context while keeping the intended occurrence identifiable.
+     A unique deletion target must end with new_string=""; do not rewrite retained neighbors.
+  Any quoted preservation context or locator_text in the plan is a location hint, not an instruction
+  to include that text in the replacement.
+  Examples for unique targets: from "第一句。第二句。第三句。", deleting only the first sentence
+  uses old_string="第一句。", new_string=""; deleting only the middle sentence uses
+  old_string="第二句。", new_string=""; deleting only the last sentence uses
+  old_string="第三句。", new_string="". From "术语（补充说明）", deleting only the parenthesis
+  and its contents uses old_string="（补充说明）", new_string=""; leave "术语" outside the patch.
 - Copy old_string character for character from the supplied Markdown, including punctuation,
   whitespace, line breaks, Markdown syntax, and backslashes. Never invent blank lines between
   sentences or normalize the source text. JSON escaping must decode to the exact original text.
@@ -325,9 +366,17 @@ Output semantics:
   copying old_string: all operations are generated together against the same original document.
 - Update replaces the selected content, create inserts before or after content_ref, and move
   removes source content and inserts it at destination_ref. Delete removes only the requested content.
-- For a pure sentence or phrase deletion whose target is unique within content_ref, copy only
-  the exact target into old_string and use new_string="". Only repeated text requiring
-  disambiguation may include minimal surrounding context, preserved verbatim in new_string.
+- For each pure sentence or phrase deletion requiring model replacements, first extract only
+  the exact deletion target, then check whether it occurs once within content_ref. If unique,
+  return exactly one replacement for this target with old_string equal to it and new_string="".
+  Only actual repeated targets needing disambiguation may include the smallest necessary context,
+  preserved verbatim in new_string. Before returning, remove shared retained prefixes or suffixes
+  that are unnecessary to identify the intended occurrence. Quoted preservation context or
+  locator_text in the plan is a location hint, not part of the deletion target.
+  Examples for unique targets in "第一句。第二句。第三句。": deleting the middle sentence uses
+  old_string="第二句。", new_string=""; deleting the last sentence uses
+  old_string="第三句。", new_string="". In "术语（补充说明）", deleting only the parenthesis
+  and its contents uses old_string="（补充说明）", new_string=""; do not reproduce "术语".
   Never invent whitespace or line breaks; JSON escaping must decode to the exact source text.
 - References use heading_path and occurrence, or document_root=true. Never use node_id or
   placeholder_id for Markdown HTML anchors.
