@@ -302,8 +302,11 @@ Output semantics:
   old_string="第三句。", new_string="". From "术语（补充说明）", deleting only the parenthesis
   and its contents uses old_string="（补充说明）", new_string=""; leave "术语" outside the patch.
 - Copy old_string character for character from the supplied Markdown, including punctuation,
-  whitespace, line breaks, Markdown syntax, and backslashes. Never invent blank lines between
-  sentences or normalize the source text. JSON escaping must decode to the exact original text.
+  whitespace, line breaks, Markdown syntax, and backslashes.
+  Preserve the original form of symbols and punctuation in copied text: Chinese forms must remain Chinese
+  and English forms must remain English; never convert between them.
+  Never invent blank lines between sentences or normalize the source text.
+  JSON escaping must decode to the exact original text.
 - Move is represented by replacements that remove the source content and insert it at destination_ref.
 - Every ModifyPlan instruction must be implemented by one or more replacements; do not omit an instruction.
 - Respect target_scope even when deterministic location was unavailable: section replaces the
