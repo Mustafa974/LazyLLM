@@ -16,6 +16,7 @@ from ..data_models.revision import (
     LocateResult,
     MarkdownModifyInstruction,
     MarkdownModifyPlan,
+    MarkdownPlanCompletion,
     MarkdownRevisionBatch,
     MarkdownRevisionContent,
     ModifyInstruction,
@@ -45,6 +46,7 @@ from ..prompts import (
     REWRITE_MARKDOWN_BLOCK_PROMPT,
 )
 from ..prompts.revision import (
+    COMPLETE_MARKDOWN_PLAN_FIELDS_PROMPT,
     GENERATE_MARKDOWN_REVISION_BATCH_PROMPT,
     GENERATE_MARKDOWN_REVISION_CONTENT_PROMPT,
     GENERATE_MODIFY_PLAN_MARKDOWN_PROMPT,
@@ -425,9 +427,13 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
             )
             modify_plan = self._call_llm_structured(prompt, plan_schema)
             invalid_shapes = invalid_plan_refs(modify_plan)
-            if invalid_shapes:
+            if invalid_shapes and is_markdown and all('field' in error for error in invalid_shapes):
+                modify_plan = self._complete_markdown_plan_fields(source_doc, modify_plan)
+                invalid_shapes = invalid_plan_refs(modify_plan)
+            elif invalid_shapes:
                 retry_prompt = RETRY_MODIFY_PLAN_MARKDOWN_PROMPT.format(
                     invalid_shapes=to_prompt_json(invalid_shapes),
+                    previous_plan_json=to_prompt_json(modify_plan),
                 ) if is_markdown else f'''
 
 Your previous plan used invalid mixed content references: {to_prompt_json(invalid_shapes)}
@@ -440,7 +446,7 @@ locator kind per reference. Return valid JSON only.
                 )
                 invalid_shapes = invalid_plan_refs(modify_plan)
             if invalid_shapes:
-                error = 'invalid content references' if is_markdown else 'invalid mixed references'
+                error = 'invalid content references or required fields' if is_markdown else 'invalid mixed references'
                 raise ValueError(
                     f'modify_plan contains {error}: {invalid_shapes}.'
                 )
@@ -549,14 +555,19 @@ locator kind per reference. Return valid JSON only.
             raise TypeError('generate_string_replace_set requires Markdown input.')
         plan = self._unified_markdown_modify_plan(modify_plan)
         writing_context = self._unified_model(context, WritingContext)
+        # Validate persisted plans too, before entering content-generation fallbacks.
+        plan = self._complete_markdown_plan_fields(source, plan)
 
         replace_set = StringReplaceSet(
             replace_set_id=f'replace-{writing_context.context_id}',
             meta={'source': 'generate_string_replace_set'},
         )
         if plan.instructions or plan.title_instruction:
-            if any(instr.target_scope != 'fragment' and instr.modify_type in {'delete', 'update'}
-                   for instr in plan.instructions):
+            if len(plan.instructions) == 1 and plan.instructions[0].modify_type == 'move' \
+                    and not plan.title_instruction:
+                replace_set = self._generate_markdown_move_replacements(source, plan, writing_context)
+            elif any(instr.target_scope != 'fragment' and instr.modify_type in {'delete', 'update'}
+                     for instr in plan.instructions):
                 replace_set = self._generate_scoped_markdown_replacements(source, plan, writing_context)
             else:
                 replace_set = self._generate_model_markdown_replacements(source, plan, writing_context)
@@ -604,8 +615,51 @@ locator kind per reference. Return valid JSON only.
                 source, instruction.locator_text or '',
                 heading_path=reference.heading_path, occurrence=reference.occurrence,
             )
-        start, end = self._markdown_section_range(source, reference)
+        start, end = (0, len(source)) if reference.document_root else self._markdown_section_range(source, reference)
+        if instruction.target_scope == 'fragment':
+            text = instruction.locator_text or ''
+            section = source[start:end]
+            if not text or section.find(text) < 0 or section.find(text) != section.rfind(text):
+                raise ValueError('Markdown fragment must match exactly once in its referenced section.')
+            return text
         return source[start:end]
+
+    def _generate_markdown_move_replacements(
+        self, source: str, plan: MarkdownModifyPlan, context: WritingContext,
+    ) -> StringReplaceSet:
+        instruction, = plan.instructions
+        try:
+            old_source = self._locate_markdown_instruction(source, instruction)
+            removal = StringReplace(old_string=old_source, new_string='', content_ref=instruction.content_ref)
+            current = self._apply_markdown_replacement(source, removal)
+            destination = instruction.model_copy(update={
+                'content_ref': instruction.destination_ref,
+                'target_scope': instruction.destination_scope,
+                'locator_text': instruction.destination_locator_text,
+            })
+            old_target = self._locate_markdown_instruction(current, destination)
+            before, after = ((old_source, old_target) if instruction.position == 'before' else (old_target, old_source))
+            if instruction.target_scope == 'fragment' and instruction.destination_scope == 'fragment':
+                new_target = before + after
+            else:
+                new_target = before.rstrip('\r\n') + '\n\n' + after
+            insertion = StringReplace(
+                old_string=old_target, new_string=new_target, content_ref=instruction.destination_ref,
+            )
+            result = StringReplaceSet(replacements=[removal, insertion])
+            for replacement in result.replacements:
+                replacement.meta = {'instruction_id': instruction.instruction_id, 'source': 'program_move'}
+            self._execute_markdown_replacements(source, result)
+            return result
+        except ValueError:
+            return self._generate_model_markdown_replacements(source, plan, context)
+
+    def _execute_markdown_replacements(self, source: str, replacements: StringReplaceSet) -> str:
+        current = source
+        for replacement in replacements.replacements:
+            self._validate_string_replace_images(StringReplaceSet(replacements=[replacement]), current)
+            current = self._apply_markdown_replacement(current, replacement)
+        return current
 
     def _generate_scoped_markdown_replacements(  # noqa: C901
         self, source: str, plan: MarkdownModifyPlan, context: WritingContext,
@@ -1301,7 +1355,7 @@ locator kind per reference. Return valid JSON only.
                 destination_key = self._content_ref_key(instr.destination_ref)
                 if destination_key not in valid_refs:
                     raise ValueError('move instruction destination_ref is absent from document.')
-                if destination_key == content_key:
+                if destination_key == content_key and not isinstance(instr, MarkdownModifyInstruction):
                     raise ValueError('move instruction cannot use its source as the destination.')
             normalized.append(instr)
 
@@ -1470,8 +1524,73 @@ locator kind per reference. Return valid JSON only.
         references = [reference for instruction in plan.instructions
                       for reference in (instruction.content_ref, instruction.destination_ref)
                       if reference is not None]
-        return [reference.model_dump(exclude_none=True) for reference in references
-                if not cls._markdown_ref_is_exclusive(reference)]
+        invalid = [reference.model_dump(exclude_none=True) for reference in references
+                   if not cls._markdown_ref_is_exclusive(reference)]
+        return invalid + cls._missing_markdown_plan_fields(plan)
+
+    @staticmethod
+    def _missing_markdown_plan_fields(plan: ModifyPlan) -> List[Dict[str, Any]]:
+        missing = []
+        for index, instruction in enumerate(plan.instructions, start=1):
+            if not isinstance(instruction, MarkdownModifyInstruction):
+                continue
+            required = {}
+            if instruction.target_scope == 'paragraph' or (
+                instruction.modify_type == 'move' and instruction.target_scope == 'fragment'
+            ):
+                required['locator_text'] = f'{instruction.target_scope} requires non-empty locator_text'
+            if instruction.modify_type in {'create', 'move'}:
+                required['position'] = f'{instruction.modify_type} requires position'
+            if instruction.modify_type == 'move':
+                required.update(destination_ref='move requires destination_ref',
+                                destination_scope='move requires destination_scope')
+                if instruction.destination_scope in {'paragraph', 'fragment'}:
+                    required['destination_locator_text'] = (
+                        f'{instruction.destination_scope} destination requires non-empty destination_locator_text'
+                    )
+            for field, error in required.items():
+                value = getattr(instruction, field)
+                if value is not None and (not isinstance(value, str) or value.strip()):
+                    continue
+                missing.append({
+                    'instruction_index': index,
+                    'instruction_id': instruction.instruction_id,
+                    'field': field,
+                    'error': error,
+                })
+        return missing
+
+    def _complete_markdown_plan_fields(self, source: str, plan: MarkdownModifyPlan) -> MarkdownModifyPlan:
+        missing = self._missing_markdown_plan_fields(plan)
+        if not missing:
+            return plan
+        allowed: Dict[int, set] = {}
+        for error in missing:
+            allowed.setdefault(error['instruction_index'], set()).add(error['field'])
+        for index, fields in allowed.items():
+            instruction = plan.instructions[index - 1]
+            if 'destination_scope' in fields and not (instruction.destination_locator_text or '').strip():
+                fields.add('destination_locator_text')
+        prompt = COMPLETE_MARKDOWN_PLAN_FIELDS_PROMPT.format(
+            previous_plan_json=to_prompt_json(plan), errors_json=to_prompt_json(missing),
+            allowed_fields_json=to_prompt_json({index: sorted(fields) for index, fields in allowed.items()}),
+            document_content=source,
+        )
+        completion = self._call_llm_structured(prompt, MarkdownPlanCompletion, trace_label='markdown_plan_completion')
+        completed = plan.model_dump()
+        seen = set()
+        for entry in completion.instructions:
+            index = entry.instruction_index
+            updates = entry.model_dump(exclude_unset=True, exclude={'instruction_index'})
+            if index in seen or index not in allowed or not updates or not updates.keys() <= allowed[index]:
+                raise ValueError(f'Markdown plan completion may only fill missing fields once at instruction {index}.')
+            seen.add(index)
+            completed['instructions'][index - 1].update(updates)
+        repaired = MarkdownModifyPlan.model_validate(completed)
+        invalid = self._invalid_markdown_plan_refs(repaired)
+        if invalid:
+            raise ValueError(f'Markdown plan completion left invalid required fields or references: {invalid}.')
+        return repaired
 
     @staticmethod
     def _content_ref_key(content_ref: ContentRef) -> Tuple[Any, ...]:
