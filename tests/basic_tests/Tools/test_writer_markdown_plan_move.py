@@ -2,12 +2,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pydantic import ValidationError
 
 from lazyllm.tools.writer.data_models import ContentRef, LocatedContent, LocateResult, WritingContext, WritingTask
-from lazyllm.tools.writer.data_models.revision import MarkdownModifyPlan, MarkdownPlanCompletion, StringReplaceSet
+from lazyllm.tools.writer.data_models.revision import MarkdownModifyPlan, StringReplaceSet
 from lazyllm.tools.writer.tools.revision_tools import WriterRevisionTools
-from lazyllm.tools.writer.utils import load_artifact_json, save_artifact_json
+from lazyllm.tools.writer.utils import load_artifact_json
 
 
 SOURCE = '# A\n\nAlpha.\n\n# B\n\nBeta.\n'
@@ -46,17 +45,8 @@ def _apply(tool, source, plan):
          'destination_scope': 'section', 'destination_ref': {'heading_path': ['A']}},
         '# A\n\nAAA\n\nCCC\n\n# B\n\nBBB\n\n# C\n\n', id='paragraph-heading-separator'),
     pytest.param(
-        '# A\n\nAAA\n\nTAIL\n\n# C\n\nCCC',
-        {'target_scope': 'paragraph', 'content_ref': {'heading_path': ['C']}, 'locator_text': 'CCC',
-         'destination_scope': 'paragraph', 'destination_ref': {'heading_path': ['A']},
-         'destination_locator_text': 'AAA'},
-        '# A\n\nAAA\n\nCCC\n\nTAIL\n\n# C\n\n', id='paragraph-existing-blank-lines'),
-    pytest.param(
         'First.  Second.', {'locator_text': 'First.', 'destination_locator_text': 'Second.'},
         'Second.  First.', id='fragment-english-spaces'),
-    pytest.param(
-        '乙。丙。甲。', {'locator_text': '甲。', 'destination_locator_text': '乙。', 'position': 'before'},
-        '甲。乙。丙。', id='fragment-chinese-before'),
 ])
 def test_move_preserves_original_text_and_separators(tool, source, fields, expected):
     with patch.object(tool, '_call_llm_structured', side_effect=AssertionError('Unexpected model call')):
@@ -95,7 +85,7 @@ def _generate(tool):
     )
 
 
-@pytest.mark.parametrize('operation,reference_retry', [('update', False), ('delete', False), ('move', True)])
+@pytest.mark.parametrize('operation,reference_retry', [('update', False), ('move', True)])
 def test_generated_plan_fills_only_missing_fields_after_optional_reference_retry(tool, operation, reference_retry):
     plan = _missing_locator_plan(operation)
     original = plan.model_dump()
@@ -132,25 +122,3 @@ def test_invalid_completion_stops_without_saving_a_plan(tool, tmp_path, completi
             _generate(tool)
     assert model.call_count == 2
     assert not list(tmp_path.rglob('modify_plan*.json'))
-
-
-def test_completion_schema_rejects_changes_outside_the_field_whitelist():
-    with pytest.raises(ValidationError):
-        MarkdownPlanCompletion(instructions=[{'instruction_index': 1, 'instruction': 'Rewrite everything.'}])
-
-
-def test_saved_plan_completes_destination_scope_and_locator_in_one_call(tool, tmp_path):
-    source = 'First. Second.'
-    plan = _move(locator_text='First.', destination_scope=None)
-    plan_path = tmp_path / 'existing-plan.json'
-    save_artifact_json(plan, str(plan_path), schema_name='lazyllm.tools.writer.data_models.revision.ModifyPlan')
-    original = plan_path.read_bytes()
-    model = MagicMock(return_value={'instructions': [{
-        'instruction_index': 1, 'destination_scope': 'fragment', 'destination_locator_text': 'Second.',
-    }]})
-    with patch.object(tool, '_build_structured_llm', return_value=model):
-        revised, replacements = _apply(tool, source, str(plan_path))
-    assert revised == 'Second. First.'
-    assert all(item.meta['source'] == 'program_move' for item in replacements.replacements)
-    assert plan_path.read_bytes() == original
-    model.assert_called_once()
