@@ -427,10 +427,7 @@ node_id must be a string. Do not include heading_path or nest objects inside nod
             )
             modify_plan = self._call_llm_structured(prompt, plan_schema)
             invalid_shapes = invalid_plan_refs(modify_plan)
-            if invalid_shapes and is_markdown and all('field' in error for error in invalid_shapes):
-                modify_plan = self._complete_markdown_plan_fields(source_doc, modify_plan)
-                invalid_shapes = invalid_plan_refs(modify_plan)
-            elif invalid_shapes:
+            if invalid_shapes and (not is_markdown or any('field' not in error for error in invalid_shapes)):
                 retry_prompt = RETRY_MODIFY_PLAN_MARKDOWN_PROMPT.format(
                     invalid_shapes=to_prompt_json(invalid_shapes),
                     previous_plan_json=to_prompt_json(modify_plan),
@@ -444,6 +441,9 @@ locator kind per reference. Return valid JSON only.
                     prompt + retry_prompt,
                     plan_schema,
                 )
+                invalid_shapes = invalid_plan_refs(modify_plan)
+            if invalid_shapes and is_markdown and all('field' in error for error in invalid_shapes):
+                modify_plan = self._complete_markdown_plan_fields(source_doc, modify_plan)
                 invalid_shapes = invalid_plan_refs(modify_plan)
             if invalid_shapes:
                 error = 'invalid content references or required fields' if is_markdown else 'invalid mixed references'
