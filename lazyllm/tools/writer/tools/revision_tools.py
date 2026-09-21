@@ -631,28 +631,50 @@ locator kind per reference. Return valid JSON only.
         try:
             old_source = self._locate_markdown_instruction(source, instruction)
             removal = StringReplace(old_string=old_source, new_string='', content_ref=instruction.content_ref)
-            current = self._apply_markdown_replacement(source, removal)
+            source_start, source_end = self._markdown_replacement_range(source, removal)
             destination = instruction.model_copy(update={
                 'content_ref': instruction.destination_ref,
                 'target_scope': instruction.destination_scope,
                 'locator_text': instruction.destination_locator_text,
             })
-            old_target = self._locate_markdown_instruction(current, destination)
+            old_target = self._locate_markdown_instruction(source, destination)
+            insertion = StringReplace(old_string=old_target, new_string='', content_ref=instruction.destination_ref)
+            target_start, target_end = self._markdown_replacement_range(source, insertion)
+            if max(source_start, target_start) < min(source_end, target_end):
+                raise ValueError('Markdown move source and destination overlap.')
             before, after = ((old_source, old_target) if instruction.position == 'before' else (old_target, old_source))
             if instruction.target_scope == 'fragment' and instruction.destination_scope == 'fragment':
                 new_target = before + after
             else:
-                new_target = before.rstrip('\r\n') + '\n\n' + after
-            insertion = StringReplace(
-                old_string=old_target, new_string=new_target, content_ref=instruction.destination_ref,
-            )
-            result = StringReplaceSet(replacements=[removal, insertion])
+                current = source[:source_start] + source[source_end:]
+                offset = len(old_source) if source_end <= target_start else 0
+                newline = '\r\n' if '\r\n' in source else '\n'
+                new_target = before + self._markdown_move_separator(before, after, newline) + after
+                new_target = (
+                    self._markdown_move_separator(current[:target_start - offset], new_target, newline)
+                    + new_target
+                    + self._markdown_move_separator(new_target, current[target_end - offset:], newline)
+                )
+            insertion.new_string = new_target
+            # Apply from right to left so original heading occurrences remain valid for both edits.
+            replacements = [insertion, removal] if source_start < target_start else [removal, insertion]
+            result = StringReplaceSet(replacements=replacements)
             for replacement in result.replacements:
                 replacement.meta = {'instruction_id': instruction.instruction_id, 'source': 'program_move'}
+            if not self._markdown_replacements_are_independent(source, result):
+                raise ValueError('Markdown move references changed during replacement.')
             self._execute_markdown_replacements(source, result)
             return result
         except ValueError:
             return self._generate_model_markdown_replacements(source, plan, context)
+
+    @staticmethod
+    def _markdown_move_separator(left: str, right: str, newline: str) -> str:
+        if not left or not right:
+            return ''
+        trailing = left[len(left.rstrip(' \t\r\n')):].count('\n')
+        leading = right[:len(right) - len(right.lstrip(' \t\r\n'))].count('\n')
+        return newline * max(0, 2 - trailing - leading)
 
     def _execute_markdown_replacements(self, source: str, replacements: StringReplaceSet) -> str:
         current = source
