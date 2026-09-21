@@ -642,10 +642,11 @@ locator kind per reference. Return valid JSON only.
             target_start, target_end = self._markdown_replacement_range(source, insertion)
             if max(source_start, target_start) < min(source_end, target_end):
                 raise ValueError('Markdown move source and destination overlap.')
-            before, after = ((old_source, old_target) if instruction.position == 'before' else (old_target, old_source))
             if instruction.target_scope == 'fragment' and instruction.destination_scope == 'fragment':
-                new_target = before + after
+                self._prepare_markdown_fragment_move(source, removal, insertion, instruction.position)
             else:
+                before, after = ((old_source, old_target) if instruction.position == 'before'
+                                 else (old_target, old_source))
                 current = source[:source_start] + source[source_end:]
                 offset = len(old_source) if source_end <= target_start else 0
                 newline = '\r\n' if '\r\n' in source else '\n'
@@ -655,7 +656,7 @@ locator kind per reference. Return valid JSON only.
                     + new_target
                     + self._markdown_move_separator(new_target, current[target_end - offset:], newline)
                 )
-            insertion.new_string = new_target
+                insertion.new_string = new_target
             # Apply from right to left so original heading occurrences remain valid for both edits.
             replacements = [insertion, removal] if source_start < target_start else [removal, insertion]
             result = StringReplaceSet(replacements=replacements)
@@ -667,6 +668,70 @@ locator kind per reference. Return valid JSON only.
             return result
         except ValueError:
             return self._generate_model_markdown_replacements(source, plan, context)
+
+    def _prepare_markdown_fragment_move(
+        self, source: str, removal: StringReplace, insertion: StringReplace, position: str,
+    ) -> None:
+        ranges = []
+        for replacement in (removal, insertion):
+            start, end = self._markdown_replacement_range(source, replacement)
+            text = replacement.old_string
+            start += len(text) - len(text.lstrip(' \t'))
+            end -= len(text) - len(text.rstrip(' \t'))
+            if start >= end or '\n' in text or '\r' in text:
+                raise ValueError('Markdown fragment move requires single-line text.')
+            reference = replacement.content_ref
+            paragraph = locate_markdown_paragraph(
+                source, text, heading_path=reference.heading_path, occurrence=reference.occurrence,
+            )
+            if re.search(r'[\\`*_~<>\[\]|]', paragraph):
+                raise ValueError('Markdown fragment move has uncertain markup boundaries.')
+            for boundary in (start, end):
+                pair = source[max(0, boundary - 1):boundary + 1]
+                if re.fullmatch(r'[A-Za-z0-9]{2}', pair) or re.search(r"['’\-]", pair):
+                    raise ValueError('Markdown fragment move cuts through a word boundary.')
+            ranges.append((start, end))
+
+        (start, end), (target_start, target_end) = ranges
+        moved, target = source[start:end], source[target_start:target_end]
+        left_space, right_space = self._markdown_fragment_spaces(source[:start], source[end:])
+        # Consume one inline separator, retaining indentation, line breaks and the other separator.
+        if right_space:
+            end += len(right_space)
+        elif left_space:
+            start -= len(left_space)
+        if max(start, target_start) < min(end, target_end):
+            raise ValueError('Markdown fragment move separators overlap the destination.')
+        removal.old_string = source[start:end]
+        insertion.old_string = target
+        if self._markdown_replacement_range(source, removal) != (start, end) \
+                or self._markdown_replacement_range(source, insertion) != (target_start, target_end):
+            raise ValueError('Markdown fragment move whitespace changed its reference.')
+        current = source[:start] + source[end:]
+        offset = end - start if end <= target_start else 0
+        left, right = current[:target_start - offset], current[target_end - offset:]
+        target_left, target_right = self._markdown_fragment_spaces(left, right)
+        spacing = (target_left if position == 'before' else target_right) or right_space or left_space
+        separator = self._markdown_fragment_separator
+        if position == 'before':
+            insertion.new_string = separator(left, moved, spacing) + moved + separator(moved, target, spacing) + target
+        else:
+            insertion.new_string = target + separator(target, moved, spacing) + moved + separator(moved, right, spacing)
+
+    @staticmethod
+    def _markdown_fragment_spaces(left: str, right: str) -> Tuple[str, str]:
+        before, after = left.rstrip(' \t'), right.lstrip(' \t')
+        left_space = left[len(before):] if before and before[-1] not in '\r\n' else ''
+        right_space = right[:len(right) - len(after)] if after and after[0] not in '\r\n' else ''
+        return left_space, right_space
+
+    @staticmethod
+    def _markdown_fragment_separator(left: str, right: str, spacing: str) -> str:
+        if not left or not right or left[-1].isspace() or right[0].isspace():
+            return ''
+        if left[-1] in '([{（【“‘' or right[0] in '.,!?;:)]}，。！？；：、）】”’':
+            return ''
+        return spacing or (' ' if left[-1].isascii() and right[0].isascii() else '')
 
     @staticmethod
     def _markdown_move_separator(left: str, right: str, newline: str) -> str:
