@@ -17,7 +17,6 @@ from ..numbering import (
 )
 from ..templates.wechat import WeChatTemplate, get_wechat_template
 from ..utils import strip_heading_numbering, validate_writer_tables
-from ..utils.serialization import CALLOUT_MARKER_RE, slice_spans_from
 from .base import NativeBlock, NativePatchOperation, WriterAdapterBase
 
 _VOID_TAGS = {
@@ -553,17 +552,6 @@ class WeChatWriterAdapter(WriterAdapterBase):
                 source_heading_level = max(1, min(5, int(semantic[1:]) - 1))
                 numbering['level'] = source_heading_level
                 source_heading_style = _sanitize_css(payload_node.attrs.get('style', ''))
-            if block_type == 'quote':
-                marker = CALLOUT_MARKER_RE.match(content)
-                if marker is not None:
-                    block_type = 'callout'
-                    title_start = marker.start(3) if marker.group(3) is not None else marker.end()
-                    aligned = ''.join(span.text for span in spans) == content
-                    content = content[title_start:].strip()
-                    spans = slice_spans_from(spans, title_start) if aligned else []
-                    numbering['callout_kind'] = str(marker.group(1))
-                    numbering['callout_fold'] = str(marker.group(2) or '')
-                    numbering['callout_titled'] = marker.group(3) is not None
             block = WriterBlock(
                 node_id=node_id,
                 type=block_type,
@@ -982,22 +970,16 @@ class WeChatWriterAdapter(WriterAdapterBase):
             caption_attr = f' style="{escape(caption_style, quote=True)}"' if caption_style else ''
             caption = f'<p{caption_attr}>{caption_text}</p>' if caption_text else ''
             return f'{caption}{self._render_table(block)}'
-        if block.type in {'quote', 'callout'}:
-            legacy = CALLOUT_MARKER_RE.match(body)
-            if block.type == 'callout' or legacy is not None:
-                if legacy is not None:
-                    legacy_title = (legacy.group(3) or '').strip()
-                    body = '\n'.join(item for item in (
-                        legacy_title, body[legacy.end():].lstrip('\n'),
-                    ) if item)
-                style = _style_text(_WECHAT_CALLOUT_STYLE)
-                style_attr = f' style="{escape(style, quote=True)}"' if style else ''
-                title_style = _style_text(_WECHAT_CALLOUT_TITLE_STYLE)
-                title_attr = f' style="{escape(title_style, quote=True)}"' if title_style else ''
-                head, _, tail = body.partition('\n')
-                head_html = f'<p{title_attr}><strong>{head}</strong></p>' if head else ''
-                tail_html = tail.replace('\n', '<br />') if tail else ''
-                return f'<section{style_attr}>{head_html}{tail_html}{children}</section>'
+        if block.type == 'callout':
+            style = _style_text(_WECHAT_CALLOUT_STYLE)
+            style_attr = f' style="{escape(style, quote=True)}"' if style else ''
+            title_style = _style_text(_WECHAT_CALLOUT_TITLE_STYLE)
+            title_attr = f' style="{escape(title_style, quote=True)}"' if title_style else ''
+            head, _, tail = body.partition('\n')
+            head_html = f'<p{title_attr}><strong>{head}</strong></p>' if head else ''
+            tail_html = tail.replace('\n', '<br />') if tail else ''
+            return f'<section{style_attr}>{head_html}{tail_html}{children}</section>'
+        if block.type == 'quote':
             style = _style_text(template.quote_style())
             style_attr = f' style="{escape(style, quote=True)}"' if style else ''
             br_body = body.replace('\n', '<br />')

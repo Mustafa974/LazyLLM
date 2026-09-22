@@ -690,22 +690,3 @@ def test_wechat_callout_renders_without_marker_and_round_trips():
     assert '<blockquote' in html and '普通引用<br />多行' in html
 
     assert writer_document_to_markdown(document) == source
-
-
-def test_wechat_legacy_callout_markers_are_stripped():
-    legacy = WriterDocument(
-        document_id='legacy-callout-document',
-        title='旧文档',
-        stage='final',
-        blocks=[WriterBlock(node_id='quote-1', type='quote', content='[!note] 注意\n正文')],
-    )
-    html = WeChatWriterAdapter().document_to_html(legacy, template='clean')
-    assert '[!note]' not in html
-    assert '<strong>注意</strong>' in html
-
-    imported = WeChatWriterAdapter().html_to_ir(
-        '<blockquote>[!note] 注意事项<br />正文</blockquote>',
-        external_document_id='legacy-draft',
-    )
-    assert imported.blocks[0].type == 'callout'
-    assert '[!note]' not in imported.blocks[0].content
